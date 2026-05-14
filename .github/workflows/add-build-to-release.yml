@@ -1,0 +1,243 @@
+# ==========================================
+# ADD BUILD TO RELEASE WORKFLOW
+# ==========================================
+# This workflow adds a specific build to an existing App Store version entry
+
+name: Add Build to Release
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+      version:
+        description: 'App Store version to add build to (leave empty to use current App Store version entry)'
+        required: false
+        type: string
+      build_number:
+        description: 'Build number to add to the release (leave empty to use latest from TestFlight)'
+        required: false
+        type: string
+      submit_for_review:
+        description: 'Submit for App Store review after adding build'
+        required: false
+        default: true
+        type: boolean
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+      version:
+        description: 'App Store version to add build to'
+        required: false
+        type: string
+      build_number:
+        description: 'Build number to add to the release'
+        required: false
+        type: string
+      submit_for_review:
+        description: 'Submit for App Store review after adding build'
+        required: false
+        default: true
+        type: boolean
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  add-build:
+    name: Add Build to Release
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: main
+        fetch-depth: 0
+
+    - name: Setup Xcode
+      uses: ./.github/actions/setup-xcode
+      with:
+        xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+    - name: Setup Ruby and Gems
+      uses: ./.github/actions/setup-ruby-gems
+
+    - name: Compute short SHA and start time
+      run: |
+        echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+    - name: Add build to release
+      id: add_build
+      env:
+        FASTLANE_SKIP_UPDATE_CHECK: "1"
+        FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+        APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      run: |
+        PLATFORM="${{ inputs.platform || 'iOS' }}"
+        VERSION="${{ inputs.version }}"
+        BUILD_NUMBER="${{ inputs.build_number }}"
+        SUBMIT_FOR_REVIEW="${{ inputs.submit_for_review }}"
+
+        if [ -n "$VERSION" ] && [ -n "$BUILD_NUMBER" ]; then
+          OUTPUT=$(bundle exec fastlane add_build_to_release platform:"$PLATFORM" version:"$VERSION" build_number:"$BUILD_NUMBER" submit_for_review:"${SUBMIT_FOR_REVIEW:-true}" 2>&1)
+        elif [ -n "$VERSION" ]; then
+          OUTPUT=$(bundle exec fastlane add_build_to_release platform:"$PLATFORM" version:"$VERSION" submit_for_review:"${SUBMIT_FOR_REVIEW:-true}" 2>&1)
+        elif [ -n "$BUILD_NUMBER" ]; then
+          OUTPUT=$(bundle exec fastlane add_build_to_release platform:"$PLATFORM" build_number:"$BUILD_NUMBER" submit_for_review:"${SUBMIT_FOR_REVIEW:-true}" 2>&1)
+        else
+          OUTPUT=$(bundle exec fastlane add_build_to_release platform:"$PLATFORM" submit_for_review:"${SUBMIT_FOR_REVIEW:-true}" 2>&1)
+        fi
+
+        echo "$OUTPUT"
+
+        ACTUAL_VERSION=$(echo "$OUTPUT" | grep -E "Found current App Store version entry:|Successfully added build" | sed -E 's/.*version[^:]*: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/' | head -1)
+        ACTUAL_BUILD=$(echo "$OUTPUT" | grep -E "Latest TestFlight build:|Successfully added build [0-9]+" | sed -E 's/.*build[^:]*:? ([0-9]+).*/\1/' | head -1)
+
+        if [ -z "$ACTUAL_VERSION" ]; then ACTUAL_VERSION="${VERSION:-unknown}"; fi
+        if [ -z "$ACTUAL_BUILD" ]; then ACTUAL_BUILD="${BUILD_NUMBER:-unknown}"; fi
+
+        echo "ACTUAL_VERSION=$ACTUAL_VERSION" >> $GITHUB_ENV
+        echo "ACTUAL_BUILD=$ACTUAL_BUILD" >> $GITHUB_ENV
+
+        if [ $? -eq 0 ]; then
+          echo "✅ Successfully added build to App Store release"
+        else
+          echo "❌ Failed to add build to App Store release"
+          exit 1
+        fi
+
+    - name: Calculate duration
+      if: always()
+      run: |
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        MINUTES=$((DURATION / 60))
+        SECONDS=$((DURATION % 60))
+        if [ $MINUTES -gt 0 ]; then
+          echo "DURATION_TEXT=${MINUTES}m ${SECONDS}s" >> "$GITHUB_ENV"
+        else
+          echo "DURATION_TEXT=${SECONDS}s" >> "$GITHUB_ENV"
+        fi
+
+    - name: Post summary
+      if: always()
+      run: |
+        echo "## 📤 Add Build to Release Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Version:** ${ACTUAL_VERSION}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build:** ${ACTUAL_BUILD}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Duration:** ${{ env.DURATION_TEXT }}" >> $GITHUB_STEP_SUMMARY
+
+    - name: Fail job if process failed
+      if: always() && steps.add_build.outcome == 'failure'
+      run: exit 1
+
+    - name: Slack Notification
+      if: always() && !inputs.skip_slack_posting
+      uses: slackapi/slack-github-action@v2.1.0
+      with:
+        webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "text": "${{ vars.APP_NAME }} iOS - Add Build to Release: ${{ steps.add_build.outcome == 'success' && '✅ Success' || '❌ Failed' }}",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "📤 ${{ vars.APP_NAME }} iOS - Add Build to Release",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\n${{ steps.add_build.outcome == 'success' && '✅ Success' || '�� Failed' }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Version:*\n${{ env.ACTUAL_VERSION }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Build:*\n${{ env.ACTUAL_BUILD }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Duration:*\n${{ env.DURATION_TEXT }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>"
+                }
+              }
+            ]
+          }

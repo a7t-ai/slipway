@@ -1,0 +1,183 @@
+name: Delete Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter_type:
+        description: 'Filter type'
+        required: true
+        type: choice
+        options:
+          - 'all'
+          - 'by_name'
+          - 'older_than_days'
+          - 'by_workflow'
+          - 'keep_latest_n'
+        default: 'all'
+
+      artifact_name_pattern:
+        description: 'Artifact name pattern (use * for wildcard, e.g., "screenshots-*")'
+        required: false
+        default: ''
+
+      days_old:
+        description: 'Delete artifacts older than N days (for older_than_days filter)'
+        required: false
+        default: '30'
+
+      workflow_name:
+        description: 'Workflow name (for by_workflow filter)'
+        required: false
+        default: ''
+
+      keep_count:
+        description: 'Number of latest artifacts to keep (for keep_latest_n filter)'
+        required: false
+        default: '5'
+
+      confirm:
+        description: 'Type "delete" to confirm deletion'
+        required: true
+        default: ''
+
+jobs:
+  delete-artifacts:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "delete" ]; then
+            echo "❌ Confirmation failed. Please type 'delete' to confirm."
+            exit 1
+          fi
+          echo "✅ Confirmation received. Proceeding with artifact deletion..."
+
+      - name: Delete artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILTER_TYPE: ${{ github.event.inputs.filter_type }}
+          ARTIFACT_NAME_PATTERN: ${{ github.event.inputs.artifact_name_pattern }}
+          DAYS_OLD: ${{ github.event.inputs.days_old }}
+          WORKFLOW_NAME: ${{ github.event.inputs.workflow_name }}
+          KEEP_COUNT: ${{ github.event.inputs.keep_count }}
+        run: |
+          echo "🔍 Fetching artifacts with filter: $FILTER_TYPE"
+
+          # Get all artifacts with metadata
+          ALL_ARTIFACTS=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --paginate \
+            --jq '.artifacts[] | {id: .id, name: .name, created_at: .created_at, workflow_run: .workflow_run.id}')
+
+          if [ -z "$ALL_ARTIFACTS" ]; then
+            echo "ℹ️  No artifacts found."
+            exit 0
+          fi
+
+          # Filter artifacts based on filter type
+          case "$FILTER_TYPE" in
+            "all")
+              echo "📦 Filter: Delete all artifacts"
+              FILTERED_ARTIFACTS=$(echo "$ALL_ARTIFACTS" | jq -r '.id')
+              ;;
+
+            "by_name")
+              if [ -z "$ARTIFACT_NAME_PATTERN" ]; then
+                echo "❌ Error: artifact_name_pattern is required for by_name filter"
+                exit 1
+              fi
+              echo "📦 Filter: Delete artifacts matching pattern '$ARTIFACT_NAME_PATTERN'"
+              # Convert wildcard pattern to regex
+              PATTERN=$(echo "$ARTIFACT_NAME_PATTERN" | sed 's/\*/.*/')
+              FILTERED_ARTIFACTS=$(echo "$ALL_ARTIFACTS" | jq -r "select(.name | test(\"^${PATTERN}$\")) | .id")
+              ;;
+
+            "older_than_days")
+              echo "📦 Filter: Delete artifacts older than $DAYS_OLD days"
+              CUTOFF_DATE=$(date -u -d "$DAYS_OLD days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-${DAYS_OLD}d +%Y-%m-%dT%H:%M:%SZ)
+              FILTERED_ARTIFACTS=$(echo "$ALL_ARTIFACTS" | jq -r "select(.created_at < \"$CUTOFF_DATE\") | .id")
+              ;;
+
+            "by_workflow")
+              if [ -z "$WORKFLOW_NAME" ]; then
+                echo "❌ Error: workflow_name is required for by_workflow filter"
+                exit 1
+              fi
+              echo "📦 Filter: Delete artifacts from workflow '$WORKFLOW_NAME'"
+
+              # Get workflow ID from workflow name
+              WORKFLOW_ID=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "/repos/${{ github.repository }}/actions/workflows" \
+                --jq ".workflows[] | select(.name == \"$WORKFLOW_NAME\") | .id")
+
+              if [ -z "$WORKFLOW_ID" ]; then
+                echo "❌ Error: Workflow '$WORKFLOW_NAME' not found"
+                exit 1
+              fi
+
+              # Get workflow runs for this workflow
+              WORKFLOW_RUN_IDS=$(gh api \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/runs?per_page=100" \
+                --paginate \
+                --jq '.workflow_runs[] | .id')
+
+              # Filter artifacts by workflow run IDs
+              FILTERED_ARTIFACTS=$(echo "$ALL_ARTIFACTS" | jq -r "select(.workflow_run as \$wr | [\"$(echo $WORKFLOW_RUN_IDS | tr '\n' ',' | sed 's/,$//')\"] | split(\",\") | map(tonumber) | contains([\$wr])) | .id")
+              ;;
+
+            "keep_latest_n")
+              echo "📦 Filter: Delete all except latest $KEEP_COUNT artifacts"
+              # Sort by created_at (descending) and skip first N
+              FILTERED_ARTIFACTS=$(echo "$ALL_ARTIFACTS" | jq -s 'sort_by(.created_at) | reverse | .[env.KEEP_COUNT | tonumber:] | .[].id')
+              ;;
+          esac
+
+          if [ -z "$FILTERED_ARTIFACTS" ]; then
+            echo "ℹ️  No artifacts match the filter criteria."
+            exit 0
+          fi
+
+          # Count artifacts
+          ARTIFACT_COUNT=$(echo "$FILTERED_ARTIFACTS" | wc -l | tr -d ' ')
+          echo "📦 Found $ARTIFACT_COUNT artifact(s) to delete"
+
+          # Show artifact details before deletion
+          echo ""
+          echo "Artifacts to be deleted:"
+          for ARTIFACT_ID in $FILTERED_ARTIFACTS; do
+            ARTIFACT_INFO=$(echo "$ALL_ARTIFACTS" | jq -r "select(.id == $ARTIFACT_ID) | \"\(.name) (created: \(.created_at))\"")
+            echo "  - $ARTIFACT_INFO"
+          done
+          echo ""
+
+          # Delete each artifact
+          DELETED=0
+          FAILED=0
+
+          for ARTIFACT_ID in $FILTERED_ARTIFACTS; do
+            echo "🗑️  Deleting artifact ID: $ARTIFACT_ID"
+            if gh api \
+              --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID"; then
+              DELETED=$((DELETED + 1))
+            else
+              echo "❌ Failed to delete artifact ID: $ARTIFACT_ID"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "✅ Deletion complete!"
+          echo "   - Successfully deleted: $DELETED"
+          echo "   - Failed: $FAILED"

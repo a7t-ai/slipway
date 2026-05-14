@@ -1,0 +1,34 @@
+# Fastlane snapshot configuration
+# Run: fastlane screenshots
+
+devices([
+  "iPhone 15 Pro Max"
+])
+
+languages([
+  "en-US",
+  "pt-BR",
+  "de-DE",
+  "es-ES",
+  "fr-FR"
+])
+
+scheme(ENV["APP_NAME"])
+
+output_directory("./fastlane/screenshots")
+
+clear_previous_screenshots(true)
+
+override_status_bar(true)
+override_status_bar_arguments("--time 9:41 --dataNetwork wifi --wifiMode active --wifiBars 3 --cellularMode active --cellularBars 4 --batteryState charged --batteryLevel 100")
+
+concurrent_simulators(true)
+
+stop_after_first_error(false)
+
+number_of_retries(1)
+
+reinstall_app(true)
+erase_simulator(false)
+
+skip_open_summary(true)

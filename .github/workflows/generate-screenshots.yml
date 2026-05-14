@@ -1,0 +1,629 @@
+# ==========================================
+# SCREENSHOT GENERATION WORKFLOW
+# ==========================================
+# This workflow generates App Store screenshots using Fastlane
+# It can be triggered in two ways:
+# 1. Manually via workflow_dispatch with options for full or partial generation
+# 2. As a reusable workflow from other workflows
+#
+# The workflow uses Fastlane for screenshot generation, which provides:
+# - Automated status bar configuration
+# - Multiple device/locale/appearance combinations
+# - Consistent screenshot quality across environments
+# - Professional App Store presentation
+
+name: Generate Screenshots
+
+on:
+  # ==========================================
+  # SCHEDULED TRIGGER
+  # ==========================================
+  # Disabled - run manually via workflow_dispatch when needed
+  # schedule:
+  #   - cron: '0 19 * * 0'
+
+  # ==========================================
+  # MANUAL TRIGGER
+  # ==========================================
+  # Allows manual execution with custom parameters
+  workflow_dispatch:
+    inputs:
+      generation_type:
+        description: 'Screenshot Generation Type'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - 'all'
+        - 'device'
+        - 'locale'
+        - 'single'
+      device:
+        description: 'Device (for device/single generation)'
+        required: false
+        type: choice
+        options:
+        - 'iPhone 17 Pro Max'
+        - 'iPhone 14 Plus'
+        - 'iPhone 17 Pro'
+      locale:
+        description: 'Locale (for locale/single generation)'
+        required: false
+        type: choice
+        options:
+        - 'en'
+        - 'de'
+        - 'es_ES'
+        - 'pt_BR'
+      appearance:
+        description: 'Appearance (for single generation)'
+        required: false
+        type: choice
+        options:
+        - 'light'
+        - 'dark'
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: false
+        type: boolean
+      upload_xcresult:
+        description: 'Upload XCResult artifacts for debugging'
+        required: false
+        default: false
+        type: boolean
+
+  # ==========================================
+  # REUSABLE WORKFLOW TRIGGER
+  # ==========================================
+  # Allows this workflow to be called by other workflows
+  workflow_call:
+    inputs:
+      generation_type:
+        description: 'Screenshot Generation Type'
+        required: false
+        default: 'all'
+        type: string
+      device:
+        description: 'Device (for device/single generation)'
+        required: false
+        type: string
+      locale:
+        description: 'Locale (for locale/single generation)'
+        required: false
+        type: string
+      appearance:
+        description: 'Appearance (for single generation)'
+        required: false
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: false
+        type: boolean
+      upload_xcresult:
+        description: 'Upload XCResult artifacts for debugging'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  generate-screenshots:
+    strategy:
+      matrix:
+        device: ['iPhone 17 Pro Max', 'iPhone 14 Plus', 'iPhone 17 Pro']  # Only 3 devices needed for App Store Connect
+        locale: ['en', 'de', 'es_ES', 'pt_BR']
+        appearance: ['light', 'dark']
+      fail-fast: false  # Don't cancel other jobs if one fails
+      max-parallel: 6   # Limit concurrent jobs to prevent resource exhaustion
+    name: ${{ matrix.device }} - ${{ matrix.locale }} - ${{ matrix.appearance }}
+    runs-on: macos-latest
+    timeout-minutes: 45  # Reduced timeout for individual combinations
+    
+    steps:
+    # ==========================================
+    # STEP 1: CHECKOUT CODE
+    # ==========================================
+    # Fetch the repository with full history
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    # ==========================================
+    # STEP 2: SETUP XCODE
+    # ==========================================
+    - name: Setup Xcode
+      uses: ./.github/actions/setup-xcode
+      with:
+        xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+    
+    # Configure additional Xcode settings
+    - name: Configure additional Xcode settings
+      run: |
+        echo "🔧 Configuring Xcode settings for screenshot generation..."
+        
+        # Enable prebuilts for faster builds
+        defaults write com.apple.dt.Xcode IDEPackageEnablePrebuilts YES
+        echo "✅ IDEPackageEnablePrebuilts enabled"
+        
+        # Allow Swift macros if script exists
+        if [ -f "scripts/allow_macros.sh" ]; then
+          echo "🔐 Configuring Swift macros..."
+          chmod +x scripts/allow_macros.sh
+          ./scripts/allow_macros.sh
+          echo "✅ Swift macros configured"
+        else
+          echo "⚠️ Allow macros script not found, skipping"
+        fi
+        
+        # Ensure screenshot script is executable
+        if [ -f "scripts/generate_screenshots.sh" ]; then
+          chmod +x scripts/generate_screenshots.sh
+          echo "✅ Screenshot script made executable"
+        else
+          echo "❌ Screenshot script not found"
+          exit 1
+        fi
+    
+    # ==========================================
+    # STEP 3: SETUP RUBY AND GEMS
+    # ==========================================
+    - name: Setup Ruby and Gems
+      uses: ./.github/actions/setup-ruby-gems
+    
+    # ==========================================
+    # STEP 4: COMPUTE METADATA
+    # ==========================================
+    # Prepare metadata for reporting and summary
+    - name: Compute metadata for matrix job
+      run: |
+        echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        echo "START_TIME=$(date +%s)" >> "$GITHUB_ENV"
+
+        # Set matrix-specific metadata
+        echo "MATRIX_DEVICE=${{ matrix.device }}" >> "$GITHUB_ENV"
+        echo "MATRIX_LOCALE=${{ matrix.locale }}" >> "$GITHUB_ENV"
+        echo "MATRIX_APPEARANCE=${{ matrix.appearance }}" >> "$GITHUB_ENV"
+
+        # Create a safe filename for artifacts
+        SAFE_DEVICE=$(echo "${{ matrix.device }}" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9_-]//g')
+        SAFE_LOCALE=$(echo "${{ matrix.locale }}" | sed 's/[^a-zA-Z0-9_-]//g')
+        SAFE_APPEARANCE=$(echo "${{ matrix.appearance }}" | sed 's/[^a-zA-Z0-9_-]//g')
+
+        echo "ARTIFACT_NAME=${SAFE_DEVICE}_${SAFE_LOCALE}_${SAFE_APPEARANCE}" >> "$GITHUB_ENV"
+        echo "GENERATION_DESC=${{ matrix.device }} - ${{ matrix.locale }} - ${{ matrix.appearance }}" >> "$GITHUB_ENV"
+    
+    # ==========================================
+    # STEP 5: GENERATE SCREENSHOTS WITH FASTLANE
+    # ==========================================
+    # Execute screenshot generation using Fastlane for matrix combination
+    - name: Generate screenshots for ${{ matrix.device }} - ${{ matrix.locale }} - ${{ matrix.appearance }}
+      id: generate
+      env:
+        FASTLANE_SKIP_UPDATE_CHECK: "1"
+        FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+      run: |
+        echo "📸 Generating screenshots via Fastlane"
+        echo "📱 Device: ${{ matrix.device }}"
+        echo "🌍 Locale: ${{ matrix.locale }}"
+        echo "🎨 Appearance: ${{ matrix.appearance }}"
+        echo "📋 Description: ${{ env.GENERATION_DESC }}"
+
+        # Verify we're using the correct Ruby and bundle
+        echo "🔧 Ruby version: $(ruby --version)"
+        echo "📦 Bundle version: $(bundle --version)"
+        echo "📍 Ruby path: $(which ruby)"
+        echo "📍 Bundle path: $(which bundle)"
+
+        # Generate screenshots for the specific matrix combination
+        echo "🚀 Generating single screenshot combination..."
+        bundle exec fastlane generate_single_screenshot \
+          device:"${{ matrix.device }}" \
+          locale:"${{ matrix.locale }}" \
+          appearance:"${{ matrix.appearance }}"
+    
+    # ==========================================
+    # STEP 6: UPLOAD SCREENSHOT ARTIFACTS
+    # ==========================================
+    # Upload generated screenshots for download and review
+    - name: Upload screenshot artifacts for ${{ env.ARTIFACT_NAME }}
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: screenshots-${{ env.ARTIFACT_NAME }}-${{ github.run_number }}
+        path: AutomatedScreenshots/
+        retention-days: 21
+        if-no-files-found: warn
+    
+    # ==========================================
+    # STEP 6B: UPLOAD XCRESULT FOR DEBUGGING
+    # ==========================================
+    # Upload XCResult files for debugging screenshot issues (optional, disabled by default)
+    - name: Upload XCResult artifacts for debugging ${{ env.ARTIFACT_NAME }}
+      if: always() && inputs.upload_xcresult
+      uses: actions/upload-artifact@v4
+      with:
+        name: xcresult-${{ env.ARTIFACT_NAME }}-${{ github.run_number }}
+        path: |
+          ~/Library/Developer/Xcode/DerivedData/**/Logs/Test/*.xcresult
+          **/*.xcresult
+        retention-days: 21
+        if-no-files-found: warn
+    
+    # ==========================================
+    # STEP 7: DEBUG SCREENSHOT RESULTS
+    # ==========================================
+    # Debug file paths and show generated screenshots
+    - name: Debug screenshot results
+      if: always()
+      run: |
+        echo "🔍 Debugging screenshot generation results..."
+        echo "Current directory: $(pwd)"
+        
+        echo ""
+        echo "Looking for AutomatedScreenshots directory:"
+        if [ -d "AutomatedScreenshots" ]; then
+          echo "✅ AutomatedScreenshots directory found"
+          echo "📁 Directory structure:"
+          # Screenshots are now saved directly as JPG files
+          find AutomatedScreenshots -type f -name "*.jpg" | head -20
+          
+          echo ""
+          echo "📊 Screenshot count by device (JPG):"
+          find AutomatedScreenshots -type f -name "*.jpg" | cut -d'/' -f2 | sort | uniq -c
+          
+          echo ""
+          echo "📊 Total screenshots generated: $(find AutomatedScreenshots -type f -name "*.jpg" | wc -l)"
+          
+          echo ""
+          echo "📏 Screenshot file sizes (JPG):"
+          find AutomatedScreenshots -type f -name "*.jpg" -exec ls -lh {} \; | head -10
+        else
+          echo "❌ AutomatedScreenshots directory not found"
+          echo "📁 Current directory contents:"
+          ls -la
+          
+          echo ""
+          echo "🔍 Searching for any PNG files in the entire project..."
+          find . -name "*.png" -type f 2>/dev/null | head -20
+          
+          echo ""
+          echo "🔍 Searching for any directories containing 'screenshot'..."
+          find . -type d -name "*screenshot*" -o -name "*Screenshot*" 2>/dev/null | head -10
+        fi
+    
+    # ==========================================
+    # STEP 8: POST WORKFLOW SUMMARY
+    # ==========================================
+    # Create a summary visible in the Actions tab
+    - name: Post screenshot generation summary for ${{ env.GENERATION_DESC }}
+      if: always()
+      run: |
+        echo "## 📸 Screenshot Generation Summary - ${{ env.GENERATION_DESC }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # Check generation outcome
+        if [ "${{ steps.generate.outcome }}" = "success" ]; then
+          echo "✅ **Screenshots generated successfully!**" >> $GITHUB_STEP_SUMMARY
+
+          # Count and list generated screenshots (now saved directly as JPG)
+          if [ -d "AutomatedScreenshots" ]; then
+            SCREENSHOT_COUNT=$(find AutomatedScreenshots -type f -name "*.jpg" | wc -l)
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Generated Screenshots: $SCREENSHOT_COUNT (JPG)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📱 **Files:**" >> $GITHUB_STEP_SUMMARY
+            find AutomatedScreenshots -type f -name "*.jpg" | sort | while read file; do
+              filename=$(basename "$file")
+              echo "- $filename" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+        elif [ "${{ steps.generate.outcome }}" = "failure" ]; then
+          echo "❌ **Screenshot generation failed**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **Screenshot generation did not complete**" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Matrix Configuration:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Device:** ${{ matrix.device }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Locale:** ${{ matrix.locale }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Appearance:** ${{ matrix.appearance }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Xcode Version:** ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **File Format:** JPG (medium quality)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Execution:** Fastlane single screenshot generation" >> $GITHUB_STEP_SUMMARY
+        echo "- **Artifact:** screenshots-${{ env.ARTIFACT_NAME }}-${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        
+    # ==========================================
+    # STEP 9: FAIL JOB IF GENERATION FAILED
+    # ==========================================
+    # Ensure the job fails if screenshot generation didn't pass
+    - name: Fail job if generation failed
+      if: always() && steps.generate.outcome == 'failure'
+      run: |
+        echo "❌ Screenshot generation failed - failing the job"
+        exit 1
+    
+    # ==========================================
+    # STEP 10: CALCULATE DURATION
+    # ==========================================
+    # Calculate generation execution time for reporting
+    - name: Calculate duration
+      if: always()
+      run: |
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        MINUTES=$((DURATION / 60))
+        SECONDS=$((DURATION % 60))
+        if [ $MINUTES -gt 0 ]; then
+          echo "DURATION_TEXT=${MINUTES}m ${SECONDS}s" >> "$GITHUB_ENV"
+        else
+          echo "DURATION_TEXT=${SECONDS}s" >> "$GITHUB_ENV"
+        fi
+    
+    # ==========================================
+    # STEP 11: SEND SLACK NOTIFICATION
+    # ==========================================
+    # Notify team via Slack about generation results (only if not skipped)
+    - name: Slack Notification for ${{ env.GENERATION_DESC }}
+      if: always() && !inputs.skip_slack_posting
+      uses: slackapi/slack-github-action@v2.1.0
+      with:
+        webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "text": "${{ vars.APP_NAME }} iOS - Screenshot Generation: ${{ steps.generate.outcome == 'success' && '✅ Completed' || steps.generate.outcome == 'failure' && '❌ Failed' || '⚠️ Incomplete' }} (${{ env.GENERATION_DESC }})",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "📸 ${{ vars.APP_NAME }} iOS - Screenshot Generation (Matrix)",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\n${{ steps.generate.outcome == 'success' && '✅ Completed' || steps.generate.outcome == 'failure' && '❌ Failed' || '⚠️ Incomplete' }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Device:*\n${{ matrix.device }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Locale:*\n${{ matrix.locale }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Appearance:*\n${{ matrix.appearance }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Duration:*\n${{ env.DURATION_TEXT }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Artifact:*\nscreenshots-${{ env.ARTIFACT_NAME }}-${{ github.run_number }}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Branch:* `${{ github.ref_name }}`\n*Commit:* <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|`${{ env.SHORT_SHA }}`>\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>"
+                }
+              }
+            ]
+          }
+
+  # ==========================================
+  # SUMMARY JOB - COLLECTS ALL MATRIX RESULTS
+  # ==========================================
+  collect-results:
+    name: Collect Screenshot Results
+    runs-on: macos-latest
+    needs: generate-screenshots
+    if: always()
+    timeout-minutes: 15
+
+    steps:
+    # Download all artifacts from matrix jobs
+    - name: Download all screenshot artifacts
+      id: download-artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-screenshots
+        pattern: screenshots-*
+        merge-multiple: true
+
+    # Combine all screenshots into single structure
+    - name: Combine all screenshots into App Store structure
+      if: always() && steps.download-artifacts.outcome == 'success'
+      run: |
+        echo "📦 Combining all matrix artifacts into unified App Store structure..."
+
+        # Create the final AutomatedScreenshots directory
+        mkdir -p AutomatedScreenshots
+
+        # Debug: Check what was actually downloaded
+        echo "🔍 Checking downloaded artifacts..."
+        if [ -d "all-screenshots" ]; then
+          echo "📁 Found downloaded artifacts directory"
+          echo "📂 Directory structure:"
+          find all-screenshots -type d | head -20
+          echo ""
+          echo "📸 Sample files:"
+          find all-screenshots -type f -name "*.jpg" | head -10
+          echo ""
+
+          # Count total files available
+          total_jpg_files=$(find all-screenshots -type f -name "*.jpg" | wc -l)
+          echo "📊 Total JPG files available: $total_jpg_files"
+
+          if [ $total_jpg_files -eq 0 ]; then
+            echo "⚠️ No JPG files found in downloaded artifacts"
+            echo "🔍 Searching for any image files..."
+            find all-screenshots -type f \( -name "*.png" -o -name "*.jpeg" \) | head -10
+          fi
+
+          # Copy all screenshots preserving the device/flow/locale structure
+          find all-screenshots -type f -name "*.jpg" | while read file; do
+            echo "📸 Processing: $file"
+            # Copy maintaining the AutomatedScreenshots structure
+            relative_path=$(echo "$file" | sed 's|all-screenshots/||' | sed 's|AutomatedScreenshots/||')
+            target_path="AutomatedScreenshots/$relative_path"
+            target_dir=$(dirname "$target_path")
+            mkdir -p "$target_dir"
+            cp "$file" "$target_path"
+            echo "✅ Copied to: $target_path"
+          done
+
+          echo ""
+          echo "📊 Final combined structure:"
+          find AutomatedScreenshots -type d | sort
+          echo ""
+          final_count=$(find AutomatedScreenshots -type f -name "*.jpg" | wc -l)
+          echo "📊 Total screenshots combined: $final_count"
+
+          if [ $final_count -eq 0 ]; then
+            echo "❌ No screenshots were successfully combined"
+            exit 1
+          fi
+        else
+          echo "❌ No artifacts downloaded directory found"
+          echo "📁 Current directory contents:"
+          ls -la
+          exit 1
+        fi
+
+    # Upload the combined artifact for the upload workflow
+    - name: Upload combined App Store screenshots
+      if: always() && steps.download-artifacts.outcome == 'success'
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-store-screenshots-combined-${{ github.run_number }}
+        path: AutomatedScreenshots/
+        retention-days: 21
+        if-no-files-found: error
+
+    - name: Collect matrix results summary
+      run: |
+        echo "## 🏁 Complete Screenshot Generation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "This workflow generated screenshots for **24 matrix combinations** (3 devices × 4 locales × 2 appearances)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Matrix Configuration:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Devices:** iPhone 17 Pro Max, iPhone 14 Plus, iPhone 17 Pro" >> $GITHUB_STEP_SUMMARY
+        echo "- **Locales:** en, de, es_ES, pt_BR" >> $GITHUB_STEP_SUMMARY
+        echo "- **Appearances:** light, dark" >> $GITHUB_STEP_SUMMARY
+        echo "- **Max Parallel Jobs:** 6" >> $GITHUB_STEP_SUMMARY
+        echo "- **Total Matrix Jobs:** 24" >> $GITHUB_STEP_SUMMARY
+        echo "- **Screenshots per Job:** ~6 (across different app flows)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Total Screenshots:** ~144 (24 × 6)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Performance Benefits:" >> $GITHUB_STEP_SUMMARY
+        echo "- ⚡ **Parallel execution** instead of sequential" >> $GITHUB_STEP_SUMMARY
+        echo "- 🚀 **Estimated ~5-6x faster** than sequential generation" >> $GITHUB_STEP_SUMMARY
+        echo "- 🔄 **Independent jobs** - one failure doesn't stop others" >> $GITHUB_STEP_SUMMARY
+        echo "- 📦 **Separate artifacts** for easy debugging" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Artifacts:" >> $GITHUB_STEP_SUMMARY
+        echo "All generated screenshots are available in two formats:" >> $GITHUB_STEP_SUMMARY
+        echo "- **Individual:** \`screenshots-{device}_{locale}_{appearance}-${{ github.run_number }}\` (24 separate artifacts)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Combined:** \`app-store-screenshots-combined-${{ github.run_number }}\` (single unified artifact)" >> $GITHUB_STEP_SUMMARY
+        echo "- Example individual: \`screenshots-iPhone_17_Pro_Max_en_light-${{ github.run_number }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "🎉 **Matrix-based parallel screenshot generation with combined artifact is now active!**" >> $GITHUB_STEP_SUMMARY
+
+    - name: Final Slack notification
+      if: always() && !inputs.skip_slack_posting
+      uses: slackapi/slack-github-action@v2.1.0
+      with:
+        webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "text": "🏁 ${{ vars.APP_NAME }} iOS - Complete Screenshot Generation Finished",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "🏁 Screenshot Generation Complete - All Matrix Jobs",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Matrix Jobs:*\n24 combinations (3×4×2) generating ~144 screenshots"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Execution:*\nParallel matrix jobs (max 6 concurrent)"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Performance:*\n~5-6x faster than sequential"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Artifacts:*\n24 individual + 1 combined artifact"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Branch:* `${{ github.ref_name }}`\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>\n\n🎉 **Matrix-based parallel screenshot generation is now live!**"
+                }
+              }
+            ]
+          }

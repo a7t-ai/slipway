@@ -1,0 +1,104 @@
+name: Upload Screenshots to App Store Connect
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        default: "Xcode-26.4.1.app"
+        type: choice
+        options:
+          - "Xcode-26.4.1.app"
+
+  workflow_call:
+    inputs:
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        type: string
+        default: "Xcode-26.4.1.app"
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  upload:
+    name: Upload Screenshots
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Verify uploadable screenshots exist
+        run: |
+          COUNT=$(find fastlane/screenshots -type d -name uploadable -exec find {} -name "*.png" \; | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ No PNGs found under fastlane/screenshots/<locale>/uploadable/. Run 'bundle exec fastlane screenshots' and commit the output."
+            exit 1
+          fi
+          echo "📸 Found $COUNT uploadable screenshot file(s)"
+
+      - name: Upload to App Store Connect
+        run: |
+          export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+          export LDFLAGS="-L/opt/homebrew/opt/ruby/lib"
+          export CPPFLAGS="-I/opt/homebrew/opt/ruby/include"
+          XCODE_VERSION="${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}"
+          export DEVELOPER_DIR="/Applications/$XCODE_VERSION/Contents/Developer"
+
+          bundle exec fastlane upload_screenshots
+
+      - name: Send Slack notification - Success
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"✅ ${{ vars.APP_NAME }} screenshots uploaded to App Store Connect"}' \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Send Slack notification - Failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"❌ ${{ vars.APP_NAME }} screenshot upload failed — see <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|workflow logs>\"}" \
+            "$SLACK_WEBHOOK_URL"

@@ -1,0 +1,165 @@
+# =============================================================================
+# ${{ vars.APP_NAME }} - CI Pipeline (iOS)
+# =============================================================================
+# Runs on push to main and pull requests.
+# Jobs: docs/PLANS detection (auto-approve PR if so), build (xcodegen +
+# xcodebuild), Claude Code Review on PRs after build passes, Slack on failure
+# (main only).
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Path Check: docs/PLANS-only PRs skip build and auto-approve
+  # ---------------------------------------------------------------------------
+  check-changes:
+    name: Check Changes
+    runs-on: macos-latest
+    outputs:
+      only_plans: ${{ steps.check.outputs.only_plans }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect docs/PLANS-only changes
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+            NON_PLAN_FILES=$(echo "$FILES" | grep -cvE '^docs/PLANS/' || true)
+            if [[ "$NON_PLAN_FILES" -eq 0 ]] && [[ -n "$FILES" ]]; then
+              echo "only_plans=true" >> "$GITHUB_OUTPUT"
+              echo "PR only contains docs/PLANS changes — skipping build"
+            else
+              echo "only_plans=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "only_plans=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Auto-Approve: Approve PRs that only touch docs/PLANS
+  # ---------------------------------------------------------------------------
+  auto-approve-plans:
+    name: Auto-Approve Plans PR
+    needs: [check-changes]
+    if: needs.check-changes.outputs.only_plans == 'true' && github.event_name == 'pull_request'
+    runs-on: macos-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Approve PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr review ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --approve \
+            --body "Auto-approved: PR only contains changes to docs/PLANS/"
+
+  # ---------------------------------------------------------------------------
+  # Build: xcodegen + xcodebuild for iOS Simulator (no code-signing)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (iOS Simulator)
+    needs: [check-changes]
+    if: needs.check-changes.outputs.only_plans != 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: 'Xcode-26.4.1.app'
+
+      - name: Ensure XcodeGen is installed
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Regenerate Xcode project
+        run: xcodegen generate
+
+      - name: xcodebuild build (iOS Simulator)
+        run: |
+          xcodebuild build \
+            -project ${{ vars.APP_NAME }}.xcodeproj \
+            -scheme ${{ vars.APP_NAME }} \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -quiet
+
+  # ---------------------------------------------------------------------------
+  # Claude Code Review: Runs after build passes (PRs only)
+  # ---------------------------------------------------------------------------
+  claude-review:
+    name: Claude Code Review
+    needs: [check-changes, build]
+    if: needs.check-changes.outputs.only_plans != 'true' && github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    uses: ./.github/workflows/claude-code-review.yml
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Slack Notification: Alert on failure (main branch only)
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    name: Notify Slack on Failure
+    needs: [check-changes, build]
+    if: failure() && github.ref == 'refs/heads/main' && needs.check-changes.outputs.only_plans != 'true'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions
+          persist-credentials: false
+      - name: Send Slack notification
+        uses: ./.github/actions/slack-notify
+        with:
+          status: failure
+          workflow_name: 'CI Build'
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}

@@ -1,0 +1,41 @@
+# ==========================================
+# SETUP XCODE COMPOSITE ACTION
+# ==========================================
+# This action configures Xcode settings for iOS builds
+# It selects the appropriate Xcode version and sets up the development environment
+
+name: 'Setup Xcode'
+description: 'Configure Xcode settings for iOS builds'
+
+inputs:
+  xcode_version:
+    description: 'Xcode version to use'
+    required: false
+    default: 'Xcode-26.0.0.app'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Configure Xcode settings
+      shell: bash
+      run: |
+        echo "🔧 Configuring Xcode settings..."
+
+        # Select and configure Xcode version
+        XCODE_VERSION="${{ inputs.xcode_version }}"
+        XCODE_PATH="/Applications/$XCODE_VERSION"
+
+        echo "🎯 Selecting Xcode: $XCODE_VERSION"
+        echo "📍 Xcode path: $XCODE_PATH"
+
+        if [ -d "$XCODE_PATH" ]; then
+          # Set environment variables for this session
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> $GITHUB_ENV
+          echo "SDKROOT=$($XCODE_PATH/Contents/Developer/usr/bin/xcrun --show-sdk-path)" >> $GITHUB_ENV
+          echo "✅ DEVELOPER_DIR set to: $XCODE_PATH/Contents/Developer"
+        else
+          echo "❌ Xcode not found at: $XCODE_PATH"
+          echo "📁 Available Xcode versions:"
+          ls -la /Applications/ | grep -i xcode || echo "No Xcode installations found"
+          exit 1
+        fi

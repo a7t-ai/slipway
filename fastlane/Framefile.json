@@ -1,0 +1,16 @@
+{
+  "default": {
+    "title": {
+      "color": "#FFFFFF"
+    },
+    "keyword": {
+      "color": "#4ECDC4"
+    },
+    "background": "./background.png",
+    "padding": 50,
+    "show_complete_frame": false,
+    "title_below_image": false,
+    "frame": "BLACK",
+    "use_platform": "IOS"
+  }
+}

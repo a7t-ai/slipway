@@ -1,0 +1,140 @@
+name: Claude Code Review
+
+on:
+  workflow_call:
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  claude-review:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request thoroughly. Use `gh pr diff` to read all changes, then analyse every file for issues.
+
+            ${{ vars.APP_NAME }} is a SwiftUI iOS app. Use the repository's README.md, project.yml (or .xcodeproj), and the docs/ tree for context on style and conventions.
+
+            ## Review Format
+
+            Structure your review using EXACTLY this format:
+
+            ```
+            # Code Review: PR #<number> - <title>
+
+            ## Summary
+            <1-2 sentence description of what the PR does>
+
+            ## 🔴 Critical Issues
+            Issues that MUST be fixed before merge: bugs, crashes, force-unwraps that can fail at runtime, race conditions, security vulnerabilities, data-loss risks, retain cycles, main-thread blocking IO.
+
+            ### 1. <Issue Title>
+            **File:** `<file>:<line>`
+            **Issue:** <description>
+            **Recommendation:** <how to fix>
+
+            ## 🟡 Medium Priority Issues
+            Should be addressed but won't cause immediate problems: weak error handling, missing accessibility labels on user-facing controls, hardcoded strings that should be localised, awkward SwiftUI body structure.
+
+            ## 🟢 Low Priority Issues
+            Style, minor improvements, nice-to-haves.
+
+            ## ✅ Positive Observations
+            Good patterns, well-written Swift, idiomatic SwiftUI usage, careful nil-handling.
+
+            ## Recommendation
+            **Status:** ✅ **Approved** OR ⚠️ **Changes Requested**
+            ```
+
+            ## Review Checklist (iOS-specific)
+
+            Check for:
+            - **Swift correctness** — type safety, nil handling, force-unwraps without guards, optional chaining mistakes
+            - **SwiftUI patterns** — appropriate use of `@State`, `@StateObject`, `@ObservedObject`, `@Environment`; no hidden retain cycles in `@Published` chains; correct view-identity for `ForEach` (stable `id`); no work in `body` getter that should be in `.task` or `.onAppear`
+            - **Concurrency** — `async/await` correctness; main-thread UI updates; no `Task` leaks
+            - **Memory** — strong/weak references in closures; `[weak self]` where retain cycles are possible
+            - **Networking** — proper error handling for API calls; handling of HTTP status codes; not blocking the main thread
+            - **Security** — no hardcoded keys/tokens/secrets; proper data validation at boundaries
+            - **Performance** — image rendering on background threads; large collection rendering with appropriate lazy stacks; avoiding redundant network requests
+            - **iOS conventions** — correct use of system SF Symbols, accessibility labels, dynamic type, dark mode, RTL layout where relevant
+            - **Code review of `project.yml`** — if changed, validate the diff makes sense (no accidentally exposed bundle ID changes, no removed resources)
+
+            Skip CI-related concerns; the build job already validates `xcodebuild build` passes.
+
+            ## Posting Instructions
+
+            You MUST do these steps in EXACTLY this order. Do not skip the verdict file — the CI build relies on it.
+
+            **Step 1 — Write the verdict file FIRST, before any other action.** This is mandatory; the CI step `Check for blocking issues` reads it to decide whether to fail the run. Run exactly one of:
+
+            - If you found ANY 🔴 Critical Issues:
+              ```
+              echo "CRITICAL" > /tmp/claude-review-verdict.txt
+              ```
+            - If you found 🟡 Medium Priority Issues (and no critical):
+              ```
+              echo "MEDIUM" > /tmp/claude-review-verdict.txt
+              ```
+            - If you found NO 🔴 Critical AND NO 🟡 Medium issues (only Low / informational / none):
+              ```
+              echo "PASS" > /tmp/claude-review-verdict.txt
+              ```
+
+            **Step 2 — Post the full review as a PR comment:**
+
+            ```
+            gh pr comment <PR_NUMBER> -b "<review body>"
+            ```
+
+            **Step 3 — Submit the review verdict on the PR.** This MUST match the verdict file you wrote in Step 1:
+
+            - If verdict was `CRITICAL` or `MEDIUM`:
+              ```
+              gh pr review <PR_NUMBER> --request-changes -b "Issues found that must be fixed before merge. See review comment for details."
+              ```
+            - If verdict was `PASS`:
+              ```
+              gh pr review <PR_NUMBER> --approve -b "No critical or medium issues found. See review comment for details."
+              ```
+
+            Use `--approve` (not `--comment`) on the pass path so the PR's `reviewDecision` transitions out of any prior `CHANGES_REQUESTED` state and the fixer agent stops re-running.
+
+          claude_args: '--model claude-opus-4-6 --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr review:*),Bash(echo:*)"'
+
+      - name: Check for blocking issues
+        if: always() && steps.claude-review.outcome == 'success'
+        run: |
+          if [ -f /tmp/claude-review-verdict.txt ]; then
+            VERDICT=$(cat /tmp/claude-review-verdict.txt | tr -d '[:space:]')
+            echo "Review verdict: $VERDICT"
+            if [ "$VERDICT" = "CRITICAL" ]; then
+              echo "::error::Claude Code Review found critical issues that must be fixed before merging. Check PR comments for details."
+              exit 1
+            elif [ "$VERDICT" = "MEDIUM" ]; then
+              echo "::error::Claude Code Review found medium priority issues that should be fixed before merging. Check PR comments for details."
+              exit 1
+            fi
+            echo "Review passed — no critical or medium issues found."
+          else
+            echo "::warning::No review verdict file found. Review may not have completed successfully."
+          fi

@@ -1,0 +1,242 @@
+# ==========================================
+# RELEASE APP WORKFLOW
+# ==========================================
+# This workflow submits an App Store version for review and release
+
+name: Release App
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+      version:
+        description: 'Version to submit for release'
+        required: true
+        type: string
+      phased_release:
+        description: 'Release strategy'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      auto_release_date:
+        description: 'Auto-release date (optional, format: YYYY-MM-DD HH:MM)'
+        required: false
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+      version:
+        description: 'Version to submit for release'
+        required: true
+        type: string
+      phased_release:
+        description: 'Release strategy'
+        required: false
+        default: 'true'
+        type: string
+      auto_release_date:
+        description: 'Auto-release date (optional)'
+        required: false
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      version:
+        description: 'Released version'
+        value: ${{ jobs.release-app.outputs.version }}
+      platform:
+        description: 'Released platform'
+        value: ${{ jobs.release-app.outputs.platform }}
+      status:
+        description: 'Release status'
+        value: ${{ jobs.release-app.outputs.status }}
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  release-app:
+    name: Release App to App Store
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      platform: ${{ steps.release.outputs.platform }}
+      status: ${{ steps.release.outputs.status }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Validate version exists in App Store Connect
+        id: validate
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+        run: |
+          VERSION="${{ inputs.version }}"
+          PLATFORM="${{ inputs.platform }}"
+
+          OUTPUT=$(bundle exec fastlane validate_app_store_version_for_release version:"$VERSION" platform:"$PLATFORM" 2>&1 || echo "")
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -q "is ready for release"; then
+            echo "✅ Version $VERSION is ready for release"
+          else
+            echo "❌ Version $VERSION is not ready for release"
+            exit 1
+          fi
+
+      - name: Release app to App Store
+        id: release
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+        run: |
+          VERSION="${{ inputs.version }}"
+          PLATFORM="${{ inputs.platform }}"
+          PHASED_RELEASE="${{ inputs.phased_release }}"
+          AUTO_RELEASE_DATE="${{ inputs.auto_release_date }}"
+
+          FASTLANE_PARAMS="version:$VERSION platform:$PLATFORM phased_release:$PHASED_RELEASE"
+
+          if [ -n "$AUTO_RELEASE_DATE" ]; then
+            FASTLANE_PARAMS="$FASTLANE_PARAMS auto_release_date:$AUTO_RELEASE_DATE"
+          fi
+
+          OUTPUT=$(bundle exec fastlane release_app_to_store $FASTLANE_PARAMS 2>&1 || echo "")
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -q "Successfully released version .* to App Store"; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  notify:
+    name: Send Notifications
+    runs-on: macos-latest
+    needs: [release-app]
+    if: always() && !inputs.skip_slack_posting
+    timeout-minutes: 5
+
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - App Store Release: ${{ inputs.version }} (${{ needs.release-app.outputs.status == 'success' && 'Released' || 'Failed' }})",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚀 ${{ vars.APP_NAME }} iOS - App Store Release",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:*\n${{ needs.release-app.outputs.status == 'success' && '✅ Released' || '❌ Failed' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n`${{ inputs.version }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Release Strategy:*\n${{ inputs.phased_release == 'true' && '📊 Phased Release' || '🌍 Release to All' }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>"
+                  }
+                }
+              ]
+            }

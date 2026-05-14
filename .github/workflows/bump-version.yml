@@ -1,0 +1,361 @@
+# ==========================================
+# VERSION BUMP WORKFLOW
+# ==========================================
+# This workflow handles automated version bumping for the iOS app.
+#
+# Version Scheme:
+# - Marketing Version: YY.MM.BUILD (e.g., 26.04.1)
+# - Build Number: Always incrementing integer from TestFlight (e.g., 1234)
+#
+# Required Secrets:
+# - APP_STORE_CONNECT_KEY_ID: App Store Connect API Key ID
+# - APP_STORE_CONNECT_ISSUER_ID: App Store Connect Issuer ID
+# - APP_STORE_CONNECT_KEY_CONTENT: Content of the .p8 private key file
+# - SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: Slack webhook for notifications
+# - SLACK_LEO_ID: Slack user ID for mentions
+# - GIT_USER_NAME: Git commit author name for version bump commits
+# - GIT_USER_EMAIL: Git commit author email for version bump commits
+
+name: Bump Version
+
+# Set permissions for the workflow to access repository contents and create PRs
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  # ==========================================
+  # MANUAL TRIGGER
+  # ==========================================
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        default: 'current'
+        type: choice
+        options:
+          - 'new'
+          - 'current'
+          - 'next_week_release'
+      force_marketing_version:
+        description: 'Force specific marketing version (e.g., 26.04.1) - leave empty for automatic'
+        required: false
+        type: string
+        default: ''
+      force_build_number:
+        description: 'Force specific build number (e.g., 75) - leave empty for automatic'
+        required: false
+        type: string
+        default: ''
+
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  # ==========================================
+  # REUSABLE WORKFLOW TRIGGER
+  # ==========================================
+  workflow_call:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: false
+        default: 'current'
+        type: string
+      force_marketing_version:
+        description: 'Force specific marketing version (e.g., 26.04.1) - leave empty for automatic'
+        required: false
+        default: ''
+        type: string
+      force_build_number:
+        description: 'Force specific build number (e.g., 75) - leave empty for automatic'
+        required: false
+        default: ''
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+      SLACK_LEO_ID:
+        description: 'Slack user ID for mentions (optional)'
+        required: false
+      GIT_USER_NAME:
+        required: true
+      GIT_USER_EMAIL:
+        required: true
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  bump-version:
+    name: Bump Version
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    outputs:
+      marketing_version: ${{ steps.bump.outputs.marketing_version }}
+      build_number: ${{ steps.bump.outputs.build_number }}
+      previous_marketing_version: ${{ steps.bump.outputs.previous_marketing_version }}
+      previous_build_number: ${{ steps.bump.outputs.previous_build_number }}
+      new_version: ${{ steps.bump.outputs.marketing_version }}
+
+    steps:
+    # ==========================================
+    # STEP 1: CHECKOUT CODE
+    # ==========================================
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    # ==========================================
+    # STEP 2: SETUP XCODE
+    # ==========================================
+    - name: Setup Xcode
+      uses: ./.github/actions/setup-xcode
+      with:
+        xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+    # ==========================================
+    # STEP 3: SETUP RUBY AND GEMS
+    # ==========================================
+    - name: Setup Ruby and Gems
+      uses: ./.github/actions/setup-ruby-gems
+
+    # ==========================================
+    # STEP 4: CONFIGURE GIT AND SSH
+    # ==========================================
+    - name: Configure Git and SSH
+      run: |
+        echo "🔐 Testing SSH connection to GitHub..."
+        ssh -T git@github.com || true
+
+        git remote set-url origin git@github.com:${{ github.repository }}.git
+
+        git config user.name "${{ secrets.GIT_USER_NAME }}"
+        git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+
+        echo "✅ Git and SSH configured"
+
+    # ==========================================
+    # STEP 5: BUMP VERSION WITH FASTLANE
+    # ==========================================
+    - name: Bump version
+      id: bump
+      env:
+        APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        FASTLANE_SKIP_UPDATE_CHECK: "1"
+        FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+        PATH: "/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:/usr/bin:/bin:${{ env.PATH }}"
+        LDFLAGS: "-L/opt/homebrew/opt/ruby/lib"
+        CPPFLAGS: "-I/opt/homebrew/opt/ruby/include"
+      run: |
+        echo "🔍 Git Debug Information:"
+        echo "  Current directory: $(pwd)"
+        echo "  Git branch: $(git branch --show-current || echo 'DETACHED')"
+        git status --short || echo "  Git status failed"
+        echo ""
+
+        VERSION_TYPE="${{ inputs.version_type }}"
+        if [ -z "$VERSION_TYPE" ]; then
+          VERSION_TYPE="current"
+        fi
+        echo "🚀 Bumping version with type: $VERSION_TYPE"
+
+        prev_marketing=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+        prev_build=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+        echo "📍 Current version: $prev_marketing ($prev_build)"
+
+        FASTLANE_PARAMS="version_type:$VERSION_TYPE"
+
+        FORCE_MARKETING_VERSION="${{ inputs.force_marketing_version }}"
+        if [ -n "$FORCE_MARKETING_VERSION" ]; then
+          FASTLANE_PARAMS="$FASTLANE_PARAMS force_marketing_version:$FORCE_MARKETING_VERSION"
+          echo "🎯 Using forced marketing version: $FORCE_MARKETING_VERSION"
+        fi
+
+        FORCE_BUILD_NUMBER="${{ inputs.force_build_number }}"
+        if [ -n "$FORCE_BUILD_NUMBER" ]; then
+          FASTLANE_PARAMS="$FASTLANE_PARAMS force_build_number:$FORCE_BUILD_NUMBER"
+          echo "🎯 Using forced build number: $FORCE_BUILD_NUMBER"
+        fi
+
+        echo "🚀 Running Fastlane with parameters: $FASTLANE_PARAMS"
+
+        output=$(bundle exec fastlane bump_version $FASTLANE_PARAMS)
+        echo "$output"
+
+        if echo "$output" | grep -q "📱 New version:"; then
+          marketing_version=$(echo "$output" | grep "📱 New version:" | sed -E 's/.*New version: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          build_number=$(echo "$output" | grep "📱 New version:" | sed -E 's/.*\(([0-9]+)\).*/\1/')
+        elif echo "$output" | grep -q "🔨 Same version with new build:"; then
+          marketing_version=$(echo "$output" | grep "🔨 Same version with new build:" | sed -E 's/.*Same version with new build: ([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          build_number=$(echo "$output" | grep "🔨 Same version with new build:" | sed -E 's/.*\(([0-9]+)\).*/\1/')
+        else
+          echo "⚠️ Could not parse Fastlane output, reading from xcconfig..."
+          marketing_version=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          build_number=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+        fi
+
+        echo "✅ New version: $marketing_version ($build_number)"
+
+        if [ -n "$GITHUB_OUTPUT" ]; then
+          OUTPUT_DIR="$(dirname "$GITHUB_OUTPUT")"
+          if [ ! -d "$OUTPUT_DIR" ]; then
+            mkdir -p "$OUTPUT_DIR" || true
+          fi
+          if touch "$GITHUB_OUTPUT" 2>/dev/null; then
+            echo "marketing_version=$marketing_version" >> "$GITHUB_OUTPUT"
+            echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+            echo "previous_marketing_version=$prev_marketing" >> "$GITHUB_OUTPUT"
+            echo "previous_build_number=$prev_build" >> "$GITHUB_OUTPUT"
+          else
+            echo "::set-output name=marketing_version::$marketing_version"
+            echo "::set-output name=build_number::$build_number"
+            echo "::set-output name=previous_marketing_version::$prev_marketing"
+            echo "::set-output name=previous_build_number::$prev_build"
+          fi
+        fi
+
+    # ==========================================
+    # STEP 6: COMMIT VERSION CHANGES
+    # ==========================================
+    - name: Commit Version Changes
+      id: commit
+      run: |
+        echo "📝 Committing directly to current branch..."
+
+        CURRENT_BRANCH="${{ github.ref_name }}"
+        echo "📍 Current branch: $CURRENT_BRANCH"
+        git checkout "$CURRENT_BRANCH" 2>/dev/null || echo "Already on $CURRENT_BRANCH"
+
+        if git diff --quiet ${{ vars.XCCONFIG_PATH }}; then
+          echo "⚠️ No version changes detected in Base.xcconfig"
+          exit 0
+        fi
+
+        echo "💾 Stashing version changes..."
+        git stash push -m "Temporary stash for version bump"
+
+        echo "🔄 Fetching latest changes from main..."
+        git fetch origin main
+        git pull origin main --rebase
+        echo "✅ Latest changes fetched from main"
+
+        echo "📦 Restoring version changes..."
+        git stash pop
+
+        git add ${{ vars.XCCONFIG_PATH }}
+        git commit -m "Bump version to ${{ steps.bump.outputs.marketing_version }} (${{ steps.bump.outputs.build_number }})"
+
+        git push origin "$CURRENT_BRANCH"
+
+        echo "✅ Version bumped directly in branch: $CURRENT_BRANCH"
+        echo "📊 New version: ${{ steps.bump.outputs.marketing_version }} (${{ steps.bump.outputs.build_number }})"
+
+    # ==========================================
+    # STEP 7: POST WORKFLOW SUMMARY
+    # ==========================================
+    - name: Post workflow summary
+      run: |
+        echo "## 📱 Version Bump Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Version Information" >> $GITHUB_STEP_SUMMARY
+        echo "- **Type:** ${{ inputs.version_type || 'current' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Marketing Version:** \`${{ steps.bump.outputs.previous_marketing_version }}\` → \`${{ steps.bump.outputs.marketing_version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Build Number:** \`${{ steps.bump.outputs.previous_build_number }}\` → \`${{ steps.bump.outputs.build_number }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+    # ==========================================
+    # STEP 8: SEND SLACK NOTIFICATION
+    # ==========================================
+    - name: Slack Notification
+      if: always() && !inputs.skip_slack_posting
+      uses: slackapi/slack-github-action@v2.1.0
+      with:
+        webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "text": "${{ vars.APP_NAME }} iOS - Version Bump: ${{ steps.bump.outputs.marketing_version }} (${{ steps.bump.outputs.build_number }})",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "📱 ${{ vars.APP_NAME }} iOS - Version Bump",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Status:*\n${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Type:*\n${{ (inputs.version_type == 'new' || github.event_name == 'workflow_dispatch' && inputs.version_type == 'new') && 'New Version' || 'Build Bump' }}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Marketing Version:*\n`${{ steps.bump.outputs.previous_marketing_version }}` → `${{ steps.bump.outputs.marketing_version }}`"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Build Number:*\n`${{ steps.bump.outputs.previous_build_number }}` → `${{ steps.bump.outputs.build_number }}`"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Commit:* ${{ job.status == 'success' && 'Version committed directly to branch' || 'Failed to commit version changes' }}\n*Trigger:* ${{ github.event_name == 'push' && 'Auto (push to main)' || 'Manual' }}\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>\n\n${{ job.status == 'success' && format('<@{0}>, version bump completed! ✅', secrets.SLACK_LEO_ID) || format('<@{0}>, version bump failed! 🚨', secrets.SLACK_LEO_ID) }}"
+                }
+              }
+            ]
+          }

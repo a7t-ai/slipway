@@ -1,0 +1,380 @@
+# ==========================================
+# TRIGGER NEW VERSION PROCESS WORKFLOW
+# ==========================================
+# This workflow orchestrates a complete new version release process including:
+# - Creating App Store version entry with current MARKETING_VERSION
+# - Writing AI-powered release notes (optional - can be skipped with keep_release_notes)
+# - Clearing release notes for next version (optional - skipped when keep_release_notes is true)
+# - Building and delivering to TestFlight
+# - Adding build to release and submitting for App Store review
+
+name: Trigger New Version Process
+
+# Set permissions for the workflow
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+on:
+  # ==========================================
+  # MANUAL TRIGGER
+  # ==========================================
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+
+      test_group:
+        description: 'TestFlight beta group name'
+        required: false
+        default: 'Reviewers'
+        type: choice
+        options:
+          - 'Reviewers'
+
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+      keep_release_notes:
+        description: 'Keep current release notes (skip writing and clearing)'
+        required: false
+        type: boolean
+        default: false
+
+  # ==========================================
+  # SCHEDULED TRIGGER (DISABLED)
+  # ==========================================
+  schedule:
+     - cron: '0 3 * * 2'  # 03:00 UTC = 04:00 CET (during standard time), every Tuesday
+
+  # ==========================================
+  # REUSABLE WORKFLOW TRIGGER
+  # ==========================================
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+
+      test_group:
+        description: 'TestFlight beta group name'
+        required: false
+        default: 'Reviewers'
+        type: string
+
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+
+      keep_release_notes:
+        description: 'Keep current release notes (skip writing and clearing)'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      MATCH_PASSWORD:
+        description: 'Match password for code signing'
+        required: true
+      DEEPSEEK_API_KEY:
+        description: 'DeepSeek API key for AI-powered release notes generation'
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+
+# Environment variables
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  # ==========================================
+  # JOB 1: BUMP VERSION
+  # ==========================================
+  bump-version:
+    name: Bump Version for New Release
+    uses: ./.github/workflows/bump-version.yml
+    with:
+      version_type: current  # 'current' keeps current marketing version, only increments build number
+      skip_slack_posting: true
+    secrets: inherit
+
+  # ==========================================
+  # JOB 2: CREATE APP STORE VERSION ENTRY
+  # ==========================================
+  create-appstore-version:
+    name: Create App Store Version Entry
+    needs: [bump-version]
+    if: needs.bump-version.result == 'success'
+    uses: ./.github/workflows/create-appstore-version.yml
+    with:
+      platform: ${{ inputs.platform || 'iOS' }}
+      xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+      skip_slack_posting: true
+    secrets:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+
+  # ==========================================
+  # JOB 3: WRITE RELEASE NOTES
+  # ==========================================
+  write-release-notes:
+    name: Write Release Notes
+    needs: [create-appstore-version]
+    if: needs.create-appstore-version.result == 'success' && !inputs.keep_release_notes
+    uses: ./.github/workflows/write-release-notes.yml
+    with:
+      platform: ${{ inputs.platform || 'iOS' }}
+      xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+      skip_slack_posting: true
+    secrets:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+      GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+      GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+
+  # ==========================================
+  # JOB 3b: UPLOAD APP STORE METADATA
+  # ==========================================
+  upload-metadata:
+    name: Upload App Store Metadata
+    needs: [create-appstore-version]
+    if: needs.create-appstore-version.result == 'success'
+    uses: ./.github/workflows/upload-metadata.yml
+    with:
+      platform: ${{ inputs.platform || 'iOS' }}
+      xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+    secrets:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      BETA_CONTACT_EMAIL: ${{ secrets.BETA_CONTACT_EMAIL }}
+      BETA_CONTACT_PHONE: ${{ secrets.BETA_CONTACT_PHONE }}
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+
+  # ==========================================
+  # JOB 4: DELIVER TO TESTFLIGHT
+  # ==========================================
+  deliver-to-testflight:
+    name: Deliver to TestFlight
+    needs: [write-release-notes, create-appstore-version, upload-metadata]
+    if: |
+      always() &&
+      needs.create-appstore-version.result == 'success' &&
+      (needs.write-release-notes.result == 'success' || needs.write-release-notes.result == 'skipped') &&
+      (needs.upload-metadata.result == 'success' || needs.upload-metadata.result == 'skipped')
+    uses: ./.github/workflows/deliver-to-testflight.yml
+    with:
+      scheme: '${{ vars.APP_NAME }}'
+      xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+      test_group: ${{ inputs.test_group || 'Reviewers' }}
+      release_notes: ''
+    secrets:
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+      SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      BETA_CONTACT_EMAIL: ${{ secrets.BETA_CONTACT_EMAIL }}
+      BETA_CONTACT_PHONE: ${{ secrets.BETA_CONTACT_PHONE }}
+      BETA_DEMO_ACCOUNT_NAME: ${{ secrets.BETA_DEMO_ACCOUNT_NAME }}
+      BETA_DEMO_ACCOUNT_PASSWORD: ${{ secrets.BETA_DEMO_ACCOUNT_PASSWORD }}
+      GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+      GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+
+  # ==========================================
+  # JOB 5: ADD BUILD TO RELEASE
+  # ==========================================
+  add-build-to-release:
+    name: Add Build to Release
+    needs: [deliver-to-testflight, create-appstore-version]
+    if: needs.deliver-to-testflight.result == 'success'
+    uses: ./.github/workflows/add-build-to-release.yml
+    with:
+      platform: ${{ inputs.platform || 'iOS' }}
+      version: ${{ needs.create-appstore-version.outputs.version }}
+      build_number: ${{ needs.deliver-to-testflight.outputs.build_number }}
+      submit_for_review: true
+      xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+      skip_slack_posting: true
+    secrets:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+
+  # ==========================================
+  # JOB 6: CLEAR RELEASE NOTES
+  # ==========================================
+  clear-release-notes:
+    name: Clear Release Notes
+    needs: [add-build-to-release, write-release-notes]
+    if: |
+      always() &&
+      (needs.add-build-to-release.result == 'success' || needs.write-release-notes.result == 'success') &&
+      !inputs.keep_release_notes
+    uses: ./.github/workflows/clear-release-notes.yml
+    with:
+      platform: ${{ inputs.platform || 'iOS' }}
+      skip_slack_posting: true
+    secrets:
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+      GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+      GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+
+  # ==========================================
+  # JOB 7: SEND FINAL STATUS NOTIFICATION
+  # ==========================================
+  notify-final-status:
+    name: Send Final Status Notification
+    runs-on: macos-latest
+    needs: [bump-version, create-appstore-version, write-release-notes, deliver-to-testflight, add-build-to-release, clear-release-notes]
+    if: always() && !inputs.skip_slack_posting
+    timeout-minutes: 5
+
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - New Version Process: ${{ needs.add-build-to-release.result == 'success' && '✅ Completed Successfully' || '❌ Failed or Incomplete' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚀 ${{ vars.APP_NAME }} iOS - New Version Process Summary",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Overall Status:*\n${{ needs.add-build-to-release.result == 'success' && '✅ Completed Successfully' || '❌ Failed or Incomplete' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Platform:*\n${{ inputs.platform || 'iOS' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n`${{ needs.create-appstore-version.outputs.version || 'Unknown' }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Build:*\n`${{ needs.deliver-to-testflight.outputs.build_number || 'Unknown' }}`"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Process Steps:*\n• Bump Version: ${{ needs.bump-version.result == 'success' && '✅' || needs.bump-version.result == 'failure' && '❌' || '⏳' }}\n• App Store Version: ${{ needs.create-appstore-version.result == 'success' && '✅' || needs.create-appstore-version.result == 'failure' && '❌' || '⏳' }}\n• Release Notes: ${{ inputs.keep_release_notes && '⏭️ (kept)' || needs.write-release-notes.result == 'success' && '✅' || needs.write-release-notes.result == 'failure' && '❌' || needs.write-release-notes.result == 'skipped' && '⏭️' || '⏳' }}\n• Clear Notes: ${{ inputs.keep_release_notes && '⏭️ (kept)' || needs.clear-release-notes.result == 'success' && '✅' || needs.clear-release-notes.result == 'failure' && '❌' || needs.clear-release-notes.result == 'skipped' && '⏭️' || '⏳' }}\n• TestFlight: ${{ needs.deliver-to-testflight.result == 'success' && '✅' || needs.deliver-to-testflight.result == 'failure' && '❌' || needs.deliver-to-testflight.result == 'skipped' && '⏭️' || '⏳' }}\n• Submit for Review: ${{ needs.add-build-to-release.result == 'success' && '✅' || needs.add-build-to-release.result == 'failure' && '❌' || needs.add-build-to-release.result == 'skipped' && '⏭️' || '⏳' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>\n\n${{ needs.add-build-to-release.result == 'success' && 'New version process completed successfully! The app has been submitted for App Store review. 🎉' || 'New version process encountered issues. Please check the workflow logs for details. 🚨' }}"
+                  }
+                }
+              ]
+            }
+
+      # ==========================================
+      # WORKFLOW SUMMARY
+      # ==========================================
+      - name: Post workflow summary
+        if: always()
+        run: |
+          echo "## 🚀 New Version Process Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Process Status" >> $GITHUB_STEP_SUMMARY
+          echo "- **Overall Status:** ${{ needs.add-build-to-release.result == 'success' && '✅ Completed Successfully' || '❌ Failed or Incomplete' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform:** ${{ inputs.platform || 'iOS' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ needs.create-appstore-version.outputs.version || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build Number:** ${{ needs.deliver-to-testflight.outputs.build_number || 'Unknown' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **TestFlight Group:** ${{ inputs.test_group || 'Reviewers' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Step Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Bump Version | ${{ needs.bump-version.result == 'success' && '✅ Success' || needs.bump-version.result == 'failure' && '❌ Failed' || '⏳ Pending' }} | Version: ${{ needs.bump-version.outputs.new_version || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Create App Store Version | ${{ needs.create-appstore-version.result == 'success' && '✅ Success' || needs.create-appstore-version.result == 'failure' && '❌ Failed' || '⏳ Pending' }} | Version: ${{ needs.create-appstore-version.outputs.version || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Write Release Notes | ${{ inputs.keep_release_notes && '⏭️ Skipped (kept)' || needs.write-release-notes.result == 'success' && '✅ Success' || needs.write-release-notes.result == 'failure' && '❌ Failed' || needs.write-release-notes.result == 'skipped' && '⏭️ Skipped' || '⏳ Pending' }} | ${{ inputs.keep_release_notes && 'Release notes kept from previous version' || needs.write-release-notes.outputs.status || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Clear Release Notes | ${{ inputs.keep_release_notes && '⏭️ Skipped (kept)' || needs.clear-release-notes.result == 'success' && '✅ Success' || needs.clear-release-notes.result == 'failure' && '❌ Failed' || needs.clear-release-notes.result == 'skipped' && '⏭️ Skipped' || '⏳ Pending' }} | ${{ inputs.keep_release_notes && 'Kept for next version' || 'Cleared for next version' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deliver to TestFlight | ${{ needs.deliver-to-testflight.result == 'success' && '✅ Success' || needs.deliver-to-testflight.result == 'failure' && '❌ Failed' || needs.deliver-to-testflight.result == 'skipped' && '⏭️ Skipped' || '⏳ Pending' }} | Build: ${{ needs.deliver-to-testflight.outputs.build_number || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Add Build to Release | ${{ needs.add-build-to-release.result == 'success' && '✅ Success' || needs.add-build-to-release.result == 'failure' && '❌ Failed' || needs.add-build-to-release.result == 'skipped' && '⏭️ Skipped' || '⏳ Pending' }} | Submitted for review |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.add-build-to-release.result }}" = "success" ]; then
+            echo "🎉 **Process completed successfully!** Your app has been:" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Version bumped to ${{ needs.bump-version.outputs.new_version || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Version entry created in App Store Connect" >> $GITHUB_STEP_SUMMARY
+            if [ "${{ inputs.keep_release_notes }}" = "true" ]; then
+              echo "- ℹ️ Release notes kept from previous version (not regenerated)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "- ✅ Release notes written" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "- ✅ Built and delivered to TestFlight" >> $GITHUB_STEP_SUMMARY
+            echo "- ✅ Submitted for App Store review" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "The app is now in the App Store review queue. You can monitor the review status in App Store Connect." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Process incomplete.** Please check the individual step logs for error details and retry as needed." >> $GITHUB_STEP_SUMMARY
+          fi

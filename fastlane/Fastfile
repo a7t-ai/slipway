@@ -1,0 +1,90 @@
+# ==========================================
+# MAIN FASTFILE
+# ==========================================
+# This is the entry point for all Fastlane operations
+# It imports specialized Fastfiles for different workflows
+
+default_platform(:ios)
+
+require "securerandom"
+
+# ==========================================
+# IMPORT SPECIALIZED FASTFILES
+# ==========================================
+# Each Fastfile handles a specific domain of functionality
+# This keeps the codebase organized and maintainable
+
+# Version management lanes (bump_version, etc.)
+import 'Fastfile.versioning.rb'
+
+# Testing lanes (run_tests, test_all, ci_test, etc.)
+import 'Fastfile.testing.rb'
+
+# Delivery lanes (deliver_to_testflight, validate_delivery, etc.)
+import 'Fastfile.delivery.rb'
+
+# App Store management lanes (create_app_store_version, etc.)
+import 'Fastfile.appstore.rb'
+
+# Screenshot generation lanes (generate_all_screenshots, etc.)
+import 'Fastfile.screenshots.rb'
+
+platform :ios do
+  # ==========================================
+  # MAIN PLATFORM LANES
+  # ==========================================
+  # Add any general-purpose lanes here that don't fit
+  # into the specialized Fastfiles
+
+  # Example: A simple lane to verify setup
+  desc "Verify Fastlane setup and configuration"
+  lane :verify_setup do
+    UI.message("✅ Fastlane is configured correctly!")
+    UI.message("📁 Available Fastfiles:")
+    UI.message("  - Fastfile (main)")
+    UI.message("  - Fastfile.versioning (version management)")
+  end
+
+  desc "Regenerate match provisioning profiles"
+  lane :regenerate_match_profiles do
+    app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_content: ENV["APP_STORE_CONNECT_KEY_CONTENT"],
+      is_key_content_base64: true,
+      in_house: false
+    )
+
+    keychain_name = "fastlane_tmp_keychain"
+    keychain_password = SecureRandom.hex
+
+    delete_keychain(name: keychain_name) rescue nil
+    create_keychain(
+      name: keychain_name,
+      password: keychain_password,
+      default_keychain: false,
+      unlock: true,
+      timeout: 3600,
+      lock_when_sleeps: false,
+      add_to_search_list: true
+    )
+
+    match(
+      type: "development",
+      app_identifier: [ENV["BUNDLE_ID"]],
+      force_for_new_devices: true,
+      keychain_name: keychain_name,
+      keychain_password: keychain_password
+    )
+
+    match(
+      type: "appstore",
+      app_identifier: [ENV["BUNDLE_ID"]],
+      force_for_new_devices: true,
+      keychain_name: keychain_name,
+      keychain_password: keychain_password
+    )
+
+    UI.success("✅ All profiles regenerated!")
+  end
+end

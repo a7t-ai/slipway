@@ -1,0 +1,40 @@
+.DS_Store
+
+# Local-only working files
+TODO.md
+NITTY-GRITTY.md
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/screenshots.html
+fastlane/test_output/
+fastlane/README.md.bak
+
+# Marketing screenshots output (users generate these per release)
+fastlane/marketing/output/
+
+# Build artifacts
+build/
+DerivedData/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.local
+*.p8
+*.p12
+
+# Editor
+.idea/
+.vscode/

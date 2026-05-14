@@ -1,0 +1,52 @@
+# ==========================================
+# SETUP RUBY AND GEMS COMPOSITE ACTION
+# ==========================================
+# This action sets up Ruby environment and installs bundle dependencies
+# It configures Homebrew Ruby and handles gem installation with caching
+
+name: 'Setup Ruby and Gems'
+description: 'Configure Ruby environment and install bundle dependencies'
+
+runs:
+  using: 'composite'
+  steps:
+    # ==========================================
+    # CACHE BUNDLE DEPENDENCIES
+    # ==========================================
+    - name: Cache bundle
+      uses: actions/cache@v4
+      with:
+        path: vendor/bundle
+        key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-gems/
+
+    # ==========================================
+    # SETUP RUBY ENVIRONMENT AND INSTALL GEMS
+    # ==========================================
+    - name: Setup Ruby and Bundler
+      shell: bash
+      run: |
+        echo "🔧 Setting up Ruby environment..."
+
+        # Use Homebrew Ruby environment
+        export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+        export LDFLAGS="-L/opt/homebrew/opt/ruby/lib"
+        export CPPFLAGS="-I/opt/homebrew/opt/ruby/include"
+
+        # Export for future steps
+        echo "PATH=/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH" >> $GITHUB_ENV
+        echo "LDFLAGS=-L/opt/homebrew/opt/ruby/lib" >> $GITHUB_ENV
+        echo "CPPFLAGS=-I/opt/homebrew/opt/ruby/include" >> $GITHUB_ENV
+
+        # Check current Ruby version
+        ruby --version
+        echo "✅ Using Homebrew Ruby"
+
+        # Configure bundle
+        bundle config set --local path vendor/bundle
+        bundle config set --local build.nkf --with-cflags="-I$(xcrun --show-sdk-path)/usr/include -Wno-error=implicit-function-declaration"
+
+        # Install gems
+        echo "📥 Installing gems..."
+        bundle install --jobs 4 --retry 3

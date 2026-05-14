@@ -1,0 +1,49 @@
+name: Regenerate Match Profiles
+
+on:
+  workflow_dispatch:
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  regenerate:
+    runs-on: macos-latest
+
+    env:
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Configure Git and SSH
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+
+      - name: Regenerate Match Profiles
+        run: |
+          echo "🔄 Regenerating provisioning profiles..."
+          bundle exec fastlane regenerate_match_profiles
+          echo "✅ All profiles regenerated"

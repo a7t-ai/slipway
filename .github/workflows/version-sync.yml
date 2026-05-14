@@ -1,0 +1,144 @@
+name: Version Sync
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  # SCHEDULED TRIGGER - Nightly
+  schedule:
+    - cron: '0 2 * * *'  # Every day at 2 AM UTC (3 AM CET)
+
+  # MANUAL TRIGGER
+  workflow_dispatch:
+    inputs:
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+  SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  sync-version:
+    name: Sync Version from TestFlight
+    runs-on: macos-latest
+
+    outputs:
+      version: ${{ steps.sync.outputs.version }}
+      build_number: ${{ steps.sync.outputs.build_number }}
+      status: ${{ steps.sync.outputs.status }}
+      changes_detected: ${{ steps.sync.outputs.changes_detected }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: 'Xcode-26.4.1.app'
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Configure Git and SSH
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+          echo "✅ Git and SSH configured"
+
+      - name: Install additional plugins
+        run: |
+          bundle exec fastlane add_plugin xcconfig || true
+
+      - name: Sync version from TestFlight to main
+        id: sync
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          echo "🔄 Syncing version from TestFlight to main..."
+
+          CURRENT_MARKETING=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          CURRENT_BUILD=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          echo "📍 Current version in main branch: $CURRENT_MARKETING ($CURRENT_BUILD)"
+
+          bundle exec fastlane bump_version version_type:current
+
+          NEW_MARKETING=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          NEW_BUILD=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          echo "📍 Latest version in TestFlight: $NEW_MARKETING ($NEW_BUILD)"
+
+          if git diff --quiet HEAD ${{ vars.XCCONFIG_PATH }}; then
+            echo "ℹ️ No changes detected - version already in sync"
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_MARKETING" >> $GITHUB_OUTPUT
+            echo "build_number=$CURRENT_BUILD" >> $GITHUB_OUTPUT
+            echo "changes_detected=false" >> $GITHUB_OUTPUT
+          else
+            echo "🔄 Version difference detected, syncing..."
+            git add ${{ vars.XCCONFIG_PATH }}
+            git fetch origin main
+            LOCAL=$(git rev-parse HEAD)
+            REMOTE=$(git rev-parse origin/main)
+            if [ "$LOCAL" != "$REMOTE" ]; then
+              git pull origin main --rebase
+            fi
+            git commit -m "Sync version with TestFlight: $NEW_MARKETING ($NEW_BUILD) [skip ci]"
+            git push origin main
+            echo "✅ Version synced to main: $NEW_MARKETING ($NEW_BUILD)"
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$NEW_MARKETING" >> $GITHUB_OUTPUT
+            echo "build_number=$NEW_BUILD" >> $GITHUB_OUTPUT
+            echo "changes_detected=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack notification - Success
+        if: success() && steps.sync.outputs.changes_detected == 'true' && env.SLACK_WEBHOOK_URL != '' && !inputs.skip_slack_posting
+        run: |
+          VERSION="${{ steps.sync.outputs.version }}"
+          BUILD="${{ steps.sync.outputs.build_number }}"
+          MESSAGE=$(cat <<EOF
+          {
+            "text": "${{ vars.APP_NAME }} Version Sync Completed! 🔄",
+            "blocks": [
+              {
+                "type": "header",
+                "text": { "type": "plain_text", "text": "✅ ${{ vars.APP_NAME }} Version Synced to Main", "emoji": true }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  { "type": "mrkdwn", "text": "*Version:*\n${VERSION} (${BUILD})" },
+                  { "type": "mrkdwn", "text": "*Action:*\nSynced from TestFlight to main branch" }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+          curl -X POST -H 'Content-type: application/json' --data "$MESSAGE" "$SLACK_WEBHOOK_URL"

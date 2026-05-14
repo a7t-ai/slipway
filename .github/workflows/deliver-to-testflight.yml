@@ -1,0 +1,441 @@
+name: Deliver to TestFlight
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "Build scheme"
+        required: true
+        default: "${{ vars.APP_NAME }}"
+        type: choice
+        options:
+          - "${{ vars.APP_NAME }}"
+
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        default: "Xcode-26.4.1.app"
+        type: choice
+        options:
+          - "Xcode-26.4.1.app"
+
+      test_group:
+        description: "TestFlight beta group name"
+        required: true
+        type: choice
+        options:
+          - "Reviewers"
+        default: "Reviewers"
+
+      release_notes:
+        description: "Release notes (leave empty to auto-generate from commits)"
+        required: false
+        type: string
+        default: ""
+
+  # Reusable workflow call trigger
+  workflow_call:
+    inputs:
+      scheme:
+        description: "Build scheme"
+        required: false
+        type: string
+        default: "${{ vars.APP_NAME }}"
+
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        type: string
+        default: "Xcode-26.4.1.app"
+
+      test_group:
+        description: "TestFlight beta group name"
+        required: false
+        type: string
+        default: "Reviewers"
+
+      release_notes:
+        description: "Release notes (leave empty to auto-generate from commits)"
+        required: false
+        type: string
+        default: ""
+
+      platform:
+        description: "Platform (legacy parameter, not used)"
+        required: false
+        type: string
+        default: "iOS"
+
+      branch:
+        description: "Branch (legacy parameter, not used)"
+        required: false
+        type: string
+        default: "main"
+
+      skip_slack_posting:
+        description: "Skip Slack notifications"
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      GH_PAT:
+        required: false
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+      SLACK_USER_ID:
+        required: false
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      MATCH_PASSWORD:
+        required: false
+      BETA_CONTACT_EMAIL:
+        required: false
+      BETA_CONTACT_PHONE:
+        required: false
+      BETA_DEMO_ACCOUNT_NAME:
+        required: false
+      BETA_DEMO_ACCOUNT_PASSWORD:
+        required: false
+      GIT_USER_NAME:
+        description: 'Git user name for commits'
+        required: false
+      GIT_USER_EMAIL:
+        description: 'Git user email for commits'
+        required: false
+    outputs:
+      version:
+        description: 'The app version'
+        value: ${{ jobs.deliver.outputs.version }}
+      build_number:
+        description: 'The build number'
+        value: ${{ jobs.deliver.outputs.build_number }}
+      delivery_status:
+        description: 'The delivery status'
+        value: ${{ jobs.deliver.outputs.delivery_status }}
+
+  # Automatic trigger on push to main (after PR merge).
+  push:
+    branches:
+      - main
+
+# Environment variables
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+  SLACK_USER_ID: ${{ secrets.SLACK_USER_ID }}
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  # ==========================================
+  # JOB 1: DELIVER TO TESTFLIGHT
+  # ==========================================
+  deliver:
+    name: Deliver to TestFlight
+    runs-on: macos-latest
+
+    outputs:
+      version: ${{ steps.deliver.outputs.version }}
+      build_number: ${{ steps.deliver.outputs.build_number }}
+      delivery_status: ${{ steps.deliver.outputs.status }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Show current version for debugging
+        run: |
+          echo "📋 Current version info:"
+          cat ${{ vars.XCCONFIG_PATH }}
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Configure Git and SSH
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+          echo "✅ Git and SSH configured"
+
+      - name: Install additional plugins
+        run: |
+          bundle exec fastlane add_plugin xcconfig || true
+
+      - name: Increment build number from TestFlight (no commit)
+        id: increment_build
+        if: github.event_name == 'push'
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+        run: |
+          echo "📦 Incrementing build number from TestFlight..."
+
+          CURRENT_MARKETING=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          CURRENT_BUILD=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+
+          echo "📍 Current version in xcconfig: $CURRENT_MARKETING ($CURRENT_BUILD)"
+
+          bundle exec fastlane bump_version version_type:current
+
+          NEW_MARKETING=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          NEW_BUILD=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+
+          echo "✅ Updated version locally (not committed): $NEW_MARKETING ($NEW_BUILD)"
+          echo "ℹ️ Synced back to main by the version-sync workflow."
+
+      - name: Generate release notes for the testing build
+        id: release_notes
+        run: |
+          MANUAL_NOTES="${{ inputs.release_notes || github.event.inputs.release_notes }}"
+
+          if [ -n "$MANUAL_NOTES" ]; then
+            echo "📝 Using manual release notes"
+            {
+              echo "notes<<EOF"
+              echo "$MANUAL_NOTES"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          else
+            echo "📝 Generating release notes from PR titles"
+            git fetch --tags 2>/dev/null || true
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+            if [ -n "$LATEST_TAG" ]; then
+              PR_TITLES=$(git log --merges "$LATEST_TAG..HEAD" --pretty=format:"%b" 2>/dev/null | \
+                grep -v "^$" | sed 's/^/• /' | sed 's/"/\\"/g; s/`/\\`/g; s/\$/\\$/g' || echo "")
+              if [ -z "$PR_TITLES" ]; then
+                PR_TITLES=$(git log --oneline --no-merges "$LATEST_TAG..HEAD" --pretty=format:"• %s" 2>/dev/null | \
+                  sed 's/"/\\"/g; s/`/\\`/g; s/\$/\\$/g' || echo "")
+              fi
+            else
+              PR_TITLES=$(git log --oneline --no-merges -n 10 --pretty=format:"• %s" 2>/dev/null | \
+                sed 's/"/\\"/g; s/`/\\`/g; s/\$/\\$/g' || echo "")
+            fi
+
+            if [ -z "$PR_TITLES" ]; then
+              PR_TITLES="• No new changes found"
+            fi
+
+            RELEASE_NOTES="Changes in this build:\n\n$PR_TITLES"
+
+            if [ ${#RELEASE_NOTES} -gt 4000 ]; then
+              RELEASE_NOTES="${RELEASE_NOTES:0:3950}...\n\n(Truncated due to TestFlight character limit)"
+            fi
+
+            {
+              echo "notes<<EOF"
+              printf "%b\n" "$RELEASE_NOTES"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          fi
+
+      - name: Test SSH connection
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+
+      - name: Clear SPM cache
+        run: |
+          echo "🧹 Clearing SPM package cache..."
+          rm -rf ~/Library/Developer/Xcode/DerivedData/*/SourcePackages || true
+          echo "✅ SPM cache cleared"
+
+      - name: Deliver to TestFlight
+        id: deliver
+        env:
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          BETA_CONTACT_EMAIL: ${{ secrets.BETA_CONTACT_EMAIL }}
+          BETA_CONTACT_PHONE: ${{ secrets.BETA_CONTACT_PHONE }}
+          BETA_DEMO_ACCOUNT_NAME: ${{ secrets.BETA_DEMO_ACCOUNT_NAME }}
+          BETA_DEMO_ACCOUNT_PASSWORD: ${{ secrets.BETA_DEMO_ACCOUNT_PASSWORD }}
+        run: |
+          export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+          export LDFLAGS="-L/opt/homebrew/opt/ruby/lib"
+          export CPPFLAGS="-I/opt/homebrew/opt/ruby/include"
+          XCODE_VERSION="${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}"
+          export DEVELOPER_DIR="/Applications/$XCODE_VERSION/Contents/Developer"
+
+          SCHEME="${{ inputs.scheme || github.event.inputs.scheme || '${{ vars.APP_NAME }}' }}"
+          TEST_GROUP="${{ inputs.test_group || github.event.inputs.test_group || 'Reviewers' }}"
+          RELEASE_NOTES="${{ steps.release_notes.outputs.notes }}"
+
+          echo "📱 Scheme: $SCHEME"
+          echo "👥 Test Group: $TEST_GROUP"
+
+          FASTLANE_NOTES=$(printf "%b" "$RELEASE_NOTES")
+
+          OUTPUT=$(bundle exec fastlane deliver_to_testflight \
+            scheme:"$SCHEME" \
+            groups:"$TEST_GROUP" \
+            release_notes:"$FASTLANE_NOTES" 2>&1)
+
+          echo "$OUTPUT"
+
+          VERSION=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          BUILD=$(grep "CURRENT_PROJECT_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+
+          if [ -z "$VERSION" ] || [ -z "$BUILD" ]; then
+            VERSION="Unknown"
+            BUILD="Unknown"
+          fi
+
+          if echo "$OUTPUT" | grep -q "Successfully uploaded to TestFlight"; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "build_number=$BUILD" >> $GITHUB_OUTPUT
+            echo "✅ Delivery successful!"
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "❌ Delivery failed!"
+            exit 1
+          fi
+
+      - name: Send Slack notification - Success
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          VERSION="${{ steps.deliver.outputs.version }}"
+          BUILD="${{ steps.deliver.outputs.build_number }}"
+          TEST_GROUP="${{ inputs.test_group || github.event.inputs.test_group || 'Reviewers' }}"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TRIGGER_TYPE="Automatic (push to main)"
+          elif [ -n "${{ inputs.scheme }}" ]; then
+            TRIGGER_TYPE="Workflow Call"
+          else
+            TRIGGER_TYPE="Manual"
+          fi
+
+          MESSAGE=$(cat <<EOF
+          {
+            "text": "${{ vars.APP_NAME }} TestFlight Delivery Successful! 🚀",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "✅ ${{ vars.APP_NAME }} TestFlight Delivery Successful!",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Version:*\n${VERSION} (${BUILD})"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Test Group:*\n${TEST_GROUP}"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Trigger:*\n${TRIGGER_TYPE}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "Branch: \`${{ github.ref_name }}\`"
+                  },
+                  {
+                    "type": "mrkdwn",
+                    "text": "Commit: \`${{ github.sha }}\`"
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$MESSAGE" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Send Slack notification - Failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TRIGGER_TYPE="Automatic (push to main)"
+          elif [ -n "${{ inputs.scheme }}" ]; then
+            TRIGGER_TYPE="Workflow Call"
+          else
+            TRIGGER_TYPE="Manual"
+          fi
+
+          MESSAGE=$(cat <<EOF
+          {
+            "text": "${{ vars.APP_NAME }} TestFlight Delivery Failed! ❌",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "❌ ${{ vars.APP_NAME }} TestFlight Delivery Failed!",
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "fields": [
+                  {
+                    "type": "mrkdwn",
+                    "text": "*Trigger:*\n${TRIGGER_TYPE}"
+                  }
+                ]
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Action Required:*\nPlease check the <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|workflow logs> for details."
+                }
+              }
+            ]
+          }
+          EOF
+          )
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "$MESSAGE" \
+            "$SLACK_WEBHOOK_URL"

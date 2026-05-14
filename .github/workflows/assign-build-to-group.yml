@@ -1,0 +1,67 @@
+name: Assign Build to Group
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_group:
+        description: "TestFlight beta group name"
+        required: true
+        type: choice
+        options:
+          - "Reviewers"
+          - "Social"
+        default: "Reviewers"
+
+      build_number:
+        description: "Build number (leave empty to use the latest available build)"
+        required: false
+        type: string
+        default: ""
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  assign:
+    name: Assign Build to Group
+    runs-on: macos-latest
+
+    env:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Assign build to group
+        run: |
+          export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+
+          TEST_GROUP="${{ inputs.test_group }}"
+          BUILD_NUMBER="${{ inputs.build_number }}"
+
+          echo "👥 Group: $TEST_GROUP"
+          echo "🔢 Build: ${BUILD_NUMBER:-<latest>}"
+
+          bundle exec fastlane assign_build_to_group \
+            groups:"$TEST_GROUP" \
+            build_number:"$BUILD_NUMBER"

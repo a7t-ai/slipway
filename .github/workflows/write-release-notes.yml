@@ -1,0 +1,239 @@
+name: Write Release Notes
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+      version:
+        description: 'Version to write release notes for (leave empty to use version from Base.xcconfig)'
+        required: false
+        type: string
+      manual_text:
+        description: 'Manual release notes text. Use \n for line breaks.'
+        required: false
+        type: string
+        default: ''
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+      version:
+        description: 'Version to write release notes for'
+        required: false
+        type: string
+      manual_text:
+        description: 'Manual release notes text'
+        required: false
+        type: string
+        default: ''
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      DEEPSEEK_API_KEY:
+        description: 'DeepSeek API key for AI-powered release notes generation'
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+      GIT_USER_NAME:
+        required: true
+      GIT_USER_EMAIL:
+        required: true
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  write-release-notes:
+    name: Write Release Notes
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    outputs:
+      status: ${{ steps.write.outputs.status }}
+      version: ${{ steps.write.outputs.version }}
+      platform: ${{ steps.write.outputs.platform }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Configure Git and SSH
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+          echo "✅ Git and SSH configured"
+
+      - name: Determine version to use
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Process CHANGES_IN_VERSION.md
+        id: changes
+        if: ${{ inputs.manual_text == '' }}
+        run: ./scripts/workflows/process_changes_in_version.sh
+
+      - name: Generate release notes
+        id: generate
+        env:
+          DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -n "${{ inputs.manual_text }}" ]; then
+            MANUAL_TEXT=$(echo "${{ inputs.manual_text }}" | sed 's/\\n/\n/g')
+            {
+              echo "english_notes<<EOF"
+              echo "$MANUAL_TEXT"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          elif [ "${{ steps.changes.outputs.has_custom_changes }}" = "true" ]; then
+            ./scripts/workflows/generate_release_notes.sh \
+              --type custom \
+              --changes "${{ steps.changes.outputs.custom_changes }}"
+          else
+            ./scripts/workflows/generate_release_notes.sh \
+              --type default \
+              --note "${{ steps.changes.outputs.selected_default }}"
+          fi
+
+      - name: Update App Store Connect release notes
+        id: write
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+          PATH: "/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:/usr/bin:/bin:${{ env.PATH }}"
+          LDFLAGS: "-L/opt/homebrew/opt/ruby/lib"
+          CPPFLAGS: "-I/opt/homebrew/opt/ruby/include"
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ inputs.platform }}"
+          ENGLISH_NOTES="${{ steps.generate.outputs.english_notes }}"
+
+          set +e
+          OUTPUT=$(bundle exec fastlane write_app_store_release_notes \
+            version:"$VERSION" \
+            platform:"$PLATFORM" \
+            english_notes:"$ENGLISH_NOTES" \
+            2>&1)
+          FASTLANE_EXIT_CODE=$?
+          set -e
+
+          echo "$OUTPUT"
+
+          if [ $FASTLANE_EXIT_CODE -eq 0 ] && (echo "$OUTPUT" | grep -q "Successfully updated release notes" || echo "$OUTPUT" | grep -q "Release notes updated successfully"); then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Post workflow summary
+        if: always()
+        run: |
+          echo "## 📝 Release Notes Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ steps.write.outputs.status || 'unknown' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Slack Notification
+        if: always() && !inputs.skip_slack_posting
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - Release Notes Update: ${{ steps.version.outputs.version }} (${{ steps.write.outputs.status == 'success' && 'Success' || 'Failed' }})",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "📝 ${{ vars.APP_NAME }} iOS - Release Notes Update", "emoji": true }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Status:*\n${{ steps.write.outputs.status == 'success' && '✅ Success' || '❌ Failed' }}" },
+                    { "type": "mrkdwn", "text": "*Version:*\n`${{ steps.version.outputs.version }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>" }
+                }
+              ]
+            }

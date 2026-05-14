@@ -1,0 +1,148 @@
+# =============================================================================
+# Slack Notification Action
+# =============================================================================
+# A composite action for sending standardized Slack notifications.
+# Use as a step within any workflow job.
+#
+# Usage:
+#   - name: Send Slack notification
+#     uses: ./.github/actions/slack-notify
+#     with:
+#       status: ${{ job.status }}
+#       workflow_name: 'Your Workflow Name'
+#       slack_webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+# =============================================================================
+
+name: 'Slack Notification'
+description: 'Send standardized Slack notifications for autoagent + CI events'
+
+inputs:
+  status:
+    description: 'Job status (success, failure, cancelled, skipped)'
+    required: true
+  workflow_name:
+    description: 'Name of the workflow for display'
+    required: true
+  slack_webhook:
+    description: 'Slack webhook URL'
+    required: true
+  custom_message:
+    description: 'Custom message to include'
+    required: false
+    default: ''
+  mention_on_failure:
+    description: 'Slack user/group ID to mention on failure'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build Slack payload
+      id: payload
+      shell: bash
+      env:
+        INPUT_STATUS: ${{ inputs.status }}
+        INPUT_WORKFLOW_NAME: ${{ inputs.workflow_name }}
+        INPUT_CUSTOM_MESSAGE: ${{ inputs.custom_message }}
+        INPUT_MENTION_ON_FAILURE: ${{ inputs.mention_on_failure }}
+        GH_EVENT_NAME: ${{ github.event_name }}
+        GH_HEAD_REF: ${{ github.head_ref }}
+        GH_REF_NAME: ${{ github.ref_name }}
+        GH_ACTOR: ${{ github.actor }}
+        GH_REPOSITORY: ${{ github.repository }}
+        GH_SHA: ${{ github.sha }}
+        GH_SERVER_URL: ${{ github.server_url }}
+        GH_RUN_ID: ${{ github.run_id }}
+        GH_RUN_NUMBER: ${{ github.run_number }}
+        GH_PR_URL: ${{ github.event.pull_request.html_url }}
+        GH_PR_NUMBER: ${{ github.event.pull_request.number }}
+        GH_PR_TITLE: ${{ github.event.pull_request.title }}
+      run: |
+        SHORT_SHA="${GH_SHA::7}"
+
+        if [ "$GH_EVENT_NAME" = "pull_request" ]; then
+          BRANCH="$GH_HEAD_REF"
+        else
+          BRANCH="$GH_REF_NAME"
+        fi
+
+        case "$INPUT_STATUS" in
+          success)   EMOJI=":white_check_mark:"; STATUS_TEXT="Passed" ;;
+          failure)   EMOJI=":x:"; STATUS_TEXT="Failed" ;;
+          cancelled) EMOJI=":warning:"; STATUS_TEXT="Cancelled" ;;
+          *)         EMOJI=":grey_question:"; STATUS_TEXT="$INPUT_STATUS" ;;
+        esac
+
+        BLOCKS=$(jq -n \
+          --arg emoji "$EMOJI" \
+          --arg workflow_name "$INPUT_WORKFLOW_NAME" \
+          --arg status_text "$STATUS_TEXT" \
+          --arg branch "$BRANCH" \
+          --arg actor "$GH_ACTOR" \
+          --arg repo "$GH_REPOSITORY" \
+          --arg sha "$GH_SHA" \
+          --arg short_sha "$SHORT_SHA" \
+          --arg server_url "$GH_SERVER_URL" \
+          --arg run_id "$GH_RUN_ID" \
+          --arg run_number "$GH_RUN_NUMBER" \
+          --arg pr_url "$GH_PR_URL" \
+          --arg pr_number "$GH_PR_NUMBER" \
+          --arg pr_title "$GH_PR_TITLE" \
+          --arg custom_message "$INPUT_CUSTOM_MESSAGE" \
+          --arg mention "$INPUT_MENTION_ON_FAILURE" \
+          --arg status "$INPUT_STATUS" \
+          '
+          [
+            {
+              type: "header",
+              text: {
+                type: "plain_text",
+                text: "\() ${{ vars.APP_NAME }} - \($workflow_name)",
+                emoji: true
+              }
+            },
+            {
+              type: "section",
+              fields: [
+                { type: "mrkdwn", text: "*Status:*\n\($status_text)" },
+                { type: "mrkdwn", text: "*Branch:*\n`\($branch)`" },
+                { type: "mrkdwn", text: "*Author:*\n\($actor)" },
+                { type: "mrkdwn", text: "*Commit:*\n<https://github.com/\($repo)/commit/\($sha)|`\($short_sha)`>" }
+              ]
+            }
+          ]
+          + (if $custom_message != "" then
+              [{
+                type: "section",
+                text: { type: "mrkdwn", text: $custom_message }
+              }]
+            else [] end)
+          + [{
+              type: "section",
+              text: {
+                type: "mrkdwn",
+                text: (
+                  "*Workflow Run:* <\($server_url)/\($repo)/actions/runs/\($run_id)|View Run #\($run_number)>"
+                  + (if $pr_url != "" then "\n*Pull Request:* <\($pr_url)|#\($pr_number) - \($pr_title)>" else "" end)
+                  + (if $status == "failure" and $mention != "" then "\n\n:rotating_light: <\($mention)> Action required!" else "" end)
+                )
+              }
+            }]
+          ')
+
+        PAYLOAD=$(jq -n \
+          --arg text "${{ vars.APP_NAME }} - $INPUT_WORKFLOW_NAME: $STATUS_TEXT" \
+          --argjson blocks "$BLOCKS" \
+          '{text: $text, blocks: $blocks}')
+
+        echo "payload<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$PAYLOAD" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+    - name: Send Slack notification
+      uses: slackapi/slack-github-action@v2.1.0
+      with:
+        webhook: ${{ inputs.slack_webhook }}
+        webhook-type: incoming-webhook
+        payload: ${{ steps.payload.outputs.payload }}

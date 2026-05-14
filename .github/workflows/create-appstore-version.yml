@@ -1,0 +1,226 @@
+# ==========================================
+# CREATE APPSTORE VERSION ENTRY WORKFLOW
+# ==========================================
+# This workflow creates a new version entry in App Store Connect
+# without uploading any build.
+
+name: Create AppStore New Version Entry
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+      version_override:
+        description: 'Version override (leave empty to use current xcconfig version)'
+        required: false
+        type: string
+        default: ''
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+      version_override:
+        description: 'Version override (leave empty to use current xcconfig version)'
+        required: false
+        default: ''
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+    outputs:
+      version:
+        description: 'The version that was created'
+        value: ${{ jobs.create-version.outputs.version }}
+      platform:
+        description: 'The platform'
+        value: ${{ jobs.create-version.outputs.platform }}
+      status:
+        description: 'The status of the version creation'
+        value: ${{ jobs.create-version.outputs.status }}
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  create-version:
+    name: Create AppStore Version Entry
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    outputs:
+      version: ${{ steps.create.outputs.version }}
+      platform: ${{ steps.create.outputs.platform }}
+      status: ${{ steps.create.outputs.status }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 2
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Determine version
+        id: version
+        run: |
+          VERSION_OVERRIDE="${{ inputs.version_override }}"
+
+          if [ -n "$VERSION_OVERRIDE" ]; then
+            VERSION="$VERSION_OVERRIDE"
+          else
+            VERSION=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            exit 1
+          fi
+
+          echo "✅ Using version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create AppStore version entry
+        id: create
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+          PATH: "/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:/usr/bin:/bin:${{ env.PATH }}"
+          LDFLAGS: "-L/opt/homebrew/opt/ruby/lib"
+          CPPFLAGS: "-I/opt/homebrew/opt/ruby/include"
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PLATFORM="${{ inputs.platform }}"
+
+          echo "🚀 Creating AppStore version entry..."
+          echo "📱 Platform: $PLATFORM"
+          echo "🔢 Version: $VERSION"
+          echo "📱 App ID: app.${{ vars.APP_SLUG }}"
+
+          OUTPUT=$(bundle exec fastlane create_app_store_version version:"$VERSION" platform:"$PLATFORM" 2>&1 || echo "")
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -qE "(Successfully created or updated version|✅.*created or updated)"; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+          elif ! echo "$OUTPUT" | grep -qE "(Error|Failed|❌)"; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "platform=$PLATFORM" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "❌ Failed to create or update version entry!"
+            exit 1
+          fi
+
+      - name: Post workflow summary
+        run: |
+          echo "## 📱 AppStore Version Entry Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **App ID:** app.${{ vars.APP_SLUG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ steps.create.outputs.status }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Slack Notification
+        if: always() && !inputs.skip_slack_posting
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - AppStore Version Entry: ${{ steps.version.outputs.version }} (${{ steps.create.outputs.status == 'success' && 'Created/Updated' || 'Failed' }})",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "📱 ${{ vars.APP_NAME }} iOS - AppStore Version Entry",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Status:*\n${{ steps.create.outputs.status == 'success' && '✅ Created/Updated' || '❌ Failed' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n`${{ steps.version.outputs.version }}`"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>"
+                  }
+                }
+              ]
+            }

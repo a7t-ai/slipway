@@ -1,0 +1,139 @@
+# ==========================================
+# CLEAR RELEASE NOTES WORKFLOW
+# ==========================================
+# This workflow clears version-specific changes from CHANGES_IN_VERSION.md
+
+name: Clear Release Notes
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: true
+        default: 'iOS'
+        type: choice
+        options:
+          - 'iOS'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Platform'
+        required: false
+        default: 'iOS'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      GH_PAT:
+        required: false
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+      GIT_USER_NAME:
+        required: true
+      GIT_USER_EMAIL:
+        required: true
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  clear-release-notes:
+    name: Clear Release Notes
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure Git and SSH
+        run: |
+          echo "🔐 Testing SSH connection to GitHub..."
+          ssh -T git@github.com || true
+          git remote set-url origin git@github.com:${{ github.repository }}.git
+          git config user.name "${{ secrets.GIT_USER_NAME }}"
+          git config user.email "${{ secrets.GIT_USER_EMAIL }}"
+          echo "✅ Git and SSH configured"
+
+      - name: Clear version-specific changes
+        run: |
+          echo "📱 Platform: ${{ inputs.platform }}"
+
+          # Make the script executable and run it
+          chmod +x ./scripts/workflows/clear_release_notes.sh
+          ./scripts/workflows/clear_release_notes.sh
+
+      - name: Commit cleared release notes
+        run: |
+          echo "📝 Committing cleared release notes..."
+          git add CHANGES_IN_VERSION.md
+
+          if git diff --staged --quiet; then
+            echo "🔍 No changes to commit - file was already cleared"
+          else
+            git commit -m "Clear release notes from CHANGES_IN_VERSION.md
+
+          - Removed version-specific changes from CHANGES_IN_VERSION.md
+          - Prepared repository for next version development
+
+          Cleared via clear-release-notes workflow"
+
+            git push origin HEAD
+            echo "✅ Successfully committed and pushed cleared release notes"
+          fi
+
+      - name: Slack Notification
+        if: always() && !inputs.skip_slack_posting
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - Release Notes Cleared",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "🧹 ${{ vars.APP_NAME }} iOS - Release Notes Cleared", "emoji": true }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Status:*\n✅ Success" },
+                    { "type": "mrkdwn", "text": "*Branch:*\n${{ github.ref_name }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>" }
+                }
+              ]
+            }

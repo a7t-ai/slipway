@@ -1,0 +1,306 @@
+# ==========================================
+# CREATE GIT TAG WORKFLOW
+# ==========================================
+# This workflow creates and pushes git tags with customizable parameters
+
+name: Create Git Tag
+
+permissions:
+  contents: write
+
+on:
+  # ==========================================
+  # MANUAL TRIGGER
+  # ==========================================
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g., 26.04.1)'
+        required: true
+        type: string
+      tag_message:
+        description: 'Tag message/description'
+        required: false
+        type: string
+        default: ''
+      commit_sha:
+        description: 'Commit SHA to tag (leave empty for current HEAD)'
+        required: false
+        type: string
+        default: ''
+      force_push:
+        description: 'Force push tag (overwrite if exists)'
+        required: false
+        type: boolean
+        default: true
+      annotated_tag:
+        description: 'Create annotated tag (vs lightweight tag)'
+        required: false
+        type: boolean
+        default: true
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+      create_release:
+        description: 'Create GitHub release for this tag'
+        required: false
+        type: boolean
+        default: true
+      release_notes:
+        description: 'Release notes/description (auto-generated if not provided)'
+        required: false
+        type: string
+        default: ''
+
+  # ==========================================
+  # REUSABLE WORKFLOW TRIGGER
+  # ==========================================
+  workflow_call:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g., 26.04.1)'
+        required: true
+        type: string
+      tag_message:
+        description: 'Tag message/description'
+        required: false
+        type: string
+        default: ''
+      commit_sha:
+        description: 'Commit SHA to tag (leave empty for current HEAD)'
+        required: false
+        type: string
+        default: ''
+      force_push:
+        description: 'Force push tag (overwrite if exists)'
+        required: false
+        type: boolean
+        default: true
+      annotated_tag:
+        description: 'Create annotated tag (vs lightweight tag)'
+        required: false
+        type: boolean
+        default: true
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: true
+      create_release:
+        description: 'Create GitHub release for this tag'
+        required: false
+        type: boolean
+        default: true
+      release_notes:
+        description: 'Release notes/description (auto-generated if not provided)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      tag_created:
+        description: 'Whether the tag was created successfully'
+        value: ${{ jobs.create-tag.outputs.tag_created }}
+      tag_name:
+        description: 'The name of the tag that was created'
+        value: ${{ jobs.create-tag.outputs.tag_name }}
+      tag_sha:
+        description: 'The SHA that the tag points to'
+        value: ${{ jobs.create-tag.outputs.tag_sha }}
+      release_created:
+        description: 'Whether a GitHub release was created'
+        value: ${{ jobs.create-tag.outputs.release_created }}
+      release_url:
+        description: 'URL of the created GitHub release'
+        value: ${{ jobs.create-tag.outputs.release_url }}
+    secrets:
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        description: 'Slack webhook for notifications (optional)'
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  create-tag:
+    name: Create and Push Git Tag
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    outputs:
+      tag_created: ${{ steps.create-tag.outputs.tag_created }}
+      tag_name: ${{ steps.create-tag.outputs.tag_name }}
+      tag_sha: ${{ steps.create-tag.outputs.tag_sha }}
+      release_created: ${{ steps.create-release.outputs.release_created }}
+      release_url: ${{ steps.create-release.outputs.release_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          TAG_NAME="${{ inputs.tag_name }}"
+          COMMIT_SHA="${{ inputs.commit_sha }}"
+
+          echo "🔍 Validating inputs..."
+          echo "🏷️ Tag name: $TAG_NAME"
+
+          if [[ ! "$TAG_NAME" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "❌ Invalid tag name format: $TAG_NAME"
+            exit 1
+          fi
+
+          if [ -n "$COMMIT_SHA" ]; then
+            if ! git cat-file -e "$COMMIT_SHA" 2>/dev/null; then
+              echo "❌ Invalid commit SHA: $COMMIT_SHA"
+              exit 1
+            fi
+          else
+            COMMIT_SHA=$(git rev-parse HEAD)
+          fi
+
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "✅ Input validation passed"
+
+      - name: Create and push git tag
+        id: create-tag
+        run: |
+          TAG_NAME="${{ inputs.tag_name }}"
+          TAG_MESSAGE="${{ inputs.tag_message }}"
+          COMMIT_SHA="${{ steps.validate.outputs.commit_sha }}"
+          FORCE_PUSH="${{ inputs.force_push }}"
+          ANNOTATED_TAG="${{ inputs.annotated_tag }}"
+
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+          if [ -z "$TAG_MESSAGE" ]; then
+            TAG_MESSAGE="Tag $TAG_NAME
+
+            🎯 Target commit: $COMMIT_SHA
+            📅 Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+            🤖 Created automatically by create-tag workflow"
+          fi
+
+          if git tag -l "$TAG_NAME" | grep -q "$TAG_NAME"; then
+            if [ "$FORCE_PUSH" = "true" ]; then
+              git tag -d "$TAG_NAME"
+            else
+              echo "❌ Tag $TAG_NAME already exists locally and force_push is disabled"
+              exit 1
+            fi
+          fi
+
+          if git ls-remote --tags origin | grep -q "refs/tags/$TAG_NAME"; then
+            if [ "$FORCE_PUSH" != "true" ]; then
+              echo "❌ Tag $TAG_NAME already exists on remote and force_push is disabled"
+              exit 1
+            fi
+          fi
+
+          if [ "$ANNOTATED_TAG" = "true" ]; then
+            git tag -a "$TAG_NAME" "$COMMIT_SHA" -m "$TAG_MESSAGE"
+          else
+            git tag "$TAG_NAME" "$COMMIT_SHA"
+          fi
+
+          if [ "$FORCE_PUSH" = "true" ]; then
+            git push origin "$TAG_NAME" --force
+          else
+            git push origin "$TAG_NAME"
+          fi
+
+          TAG_SHA=$(git rev-list -n 1 "$TAG_NAME")
+          echo "tag_created=true" >> $GITHUB_OUTPUT
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "tag_sha=$TAG_SHA" >> $GITHUB_OUTPUT
+          echo "✅ Tag $TAG_NAME created and pushed"
+
+      - name: Create GitHub Release
+        id: create-release
+        if: inputs.create_release == true && steps.create-tag.outputs.tag_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_NAME="${{ inputs.tag_name }}"
+          RELEASE_NOTES="${{ inputs.release_notes }}"
+
+          GH_CMD="gh release create '$TAG_NAME' --title '$TAG_NAME'"
+
+          if [ -n "$RELEASE_NOTES" ]; then
+            echo "$RELEASE_NOTES" > /tmp/release_notes.md
+            GH_CMD="$GH_CMD --notes-file /tmp/release_notes.md"
+          else
+            GH_CMD="$GH_CMD --generate-notes"
+          fi
+
+          RELEASE_URL=$(eval $GH_CMD)
+
+          if [ $? -eq 0 ]; then
+            echo "release_created=true" >> $GITHUB_OUTPUT
+            echo "release_url=$RELEASE_URL" >> $GITHUB_OUTPUT
+          else
+            echo "release_created=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          rm -f /tmp/release_notes.md
+
+      - name: Post workflow summary
+        if: always()
+        run: |
+          echo "## 🏷️ Git Tag Creation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag Name:** \`${{ inputs.tag_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ steps.create-tag.outputs.tag_created == 'true' && '✅ Created Successfully' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Slack Notification
+        if: always() && !inputs.skip_slack_posting && steps.create-tag.outputs.tag_created == 'true'
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ github.repository }} - Git Tag Created: ${{ inputs.tag_name }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🏷️ Git Tag Created",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Tag Name:*\n`${{ inputs.tag_name }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    }
+                  ]
+                }
+              ]
+            }

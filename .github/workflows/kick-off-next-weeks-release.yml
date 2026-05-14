@@ -1,0 +1,185 @@
+# ==========================================
+# KICK OFF NEXT WEEK'S RELEASE WORKFLOW
+# ==========================================
+
+name: Kick Off Next Week's Release
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  # ==========================================
+  # SCHEDULED TRIGGER (DISABLED)
+  # ==========================================
+  schedule:
+     - cron: '0 4 * * 2'  # Every Tuesday at 4 AM UTC (5 AM CET)
+
+  workflow_dispatch:
+    inputs:
+      target_week:
+        description: 'Target week for release (YYYY-MM-DD format for Monday of the week)'
+        required: false
+        type: string
+        default: ''
+      version_type:
+        description: 'Version increment type'
+        required: true
+        default: 'next_week_release'
+        type: choice
+        options:
+          - 'next_week_release'
+          - 'new'
+          - 'current'
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: choice
+        options:
+          - 'Xcode-26.4.1.app'
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        type: boolean
+        default: false
+
+  workflow_call:
+    inputs:
+      target_week:
+        description: 'Target week for release'
+        required: false
+        default: ''
+        type: string
+      version_type:
+        description: 'Version increment type'
+        required: false
+        default: 'next_week_release'
+        type: string
+      xcode_version:
+        description: 'Xcode Version'
+        required: false
+        default: 'Xcode-26.4.1.app'
+        type: string
+      skip_slack_posting:
+        description: 'Skip Slack notifications'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+      SLACK_LEO_ID:
+        required: false
+      GIT_USER_NAME:
+        required: true
+      GIT_USER_EMAIL:
+        required: true
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  get-current-version:
+    name: Get Current Version
+    runs-on: macos-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get current version from config
+        id: get-version
+        run: |
+          VERSION=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+          echo "📱 Current version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  create-tag:
+    name: Create Git Tag
+    needs: [get-current-version]
+    uses: ./.github/workflows/create-tag.yml
+    with:
+      tag_name: ${{ needs.get-current-version.outputs.version }}
+      tag_message: |
+        Release version ${{ needs.get-current-version.outputs.version }}
+        🚀 Version tagged before next week's bump
+      commit_sha: ''
+      force_push: true
+      annotated_tag: true
+      skip_slack_posting: true
+    secrets:
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+
+  bump-version:
+    name: Bump Version for Next Release
+    needs: [create-tag]
+    if: always()
+    uses: ./.github/workflows/bump-version.yml
+    with:
+      version_type: ${{ inputs.version_type || 'next_week_release' }}
+      xcode_version: ${{ inputs.xcode_version }}
+      skip_slack_posting: true
+    secrets:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+      SLACK_LEO_ID: ${{ secrets.SLACK_LEO_ID }}
+      GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+      GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+
+  notify-final-status:
+    name: Send Final Status Notification
+    runs-on: macos-latest
+    needs: [get-current-version, create-tag, bump-version]
+    if: always() && !inputs.skip_slack_posting
+    timeout-minutes: 5
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "${{ vars.APP_NAME }} iOS - Next Week's Release Kickoff",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "📅 ${{ vars.APP_NAME }} iOS - Next Week's Release Kickoff", "emoji": true }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Git Tag:*\n${{ needs.create-tag.result == 'success' && format('✅ Tag {0}', needs.get-current-version.outputs.version) || '❌ Failed' }}" },
+                    { "type": "mrkdwn", "text": "*Version Bump:*\n${{ needs.bump-version.result == 'success' && '✅ Success' || '❌ Failed' }}" },
+                    { "type": "mrkdwn", "text": "*New Version:*\n`${{ needs.bump-version.outputs.new_version || 'N/A' }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run #${{ github.run_number }}>" }
+                }
+              ]
+            }

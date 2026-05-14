@@ -1,0 +1,146 @@
+name: Upload App Store Metadata
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (leave empty to use MARKETING_VERSION from Base.xcconfig)"
+        required: false
+        type: string
+      platform:
+        description: "Platform"
+        required: false
+        default: "iOS"
+        type: choice
+        options:
+          - "iOS"
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        default: "Xcode-26.4.1.app"
+        type: choice
+        options:
+          - "Xcode-26.4.1.app"
+
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to upload metadata for"
+        required: false
+        type: string
+      platform:
+        description: "Platform"
+        required: false
+        default: "iOS"
+        type: string
+      xcode_version:
+        description: "Xcode Version"
+        required: false
+        default: "Xcode-26.4.1.app"
+        type: string
+    secrets:
+      APP_STORE_CONNECT_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_KEY_CONTENT:
+        required: true
+      BETA_CONTACT_EMAIL:
+        required: true
+      BETA_CONTACT_PHONE:
+        required: true
+      SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL:
+        required: false
+
+env:
+  LANG: en_US.UTF-8
+  LANGUAGE: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_GITHUB_EVENTS_CHANNEL }}
+  APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+  APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+  APP_STORE_CONNECT_KEY_CONTENT: ${{ secrets.APP_STORE_CONNECT_KEY_CONTENT }}
+  BETA_CONTACT_EMAIL: ${{ secrets.BETA_CONTACT_EMAIL }}
+  BETA_CONTACT_PHONE: ${{ secrets.BETA_CONTACT_PHONE }}
+  APP_NAME: ${{ vars.APP_NAME }}
+  APP_SLUG: ${{ vars.APP_SLUG }}
+  BUNDLE_ID: ${{ vars.BUNDLE_ID }}
+  XCCONFIG_PATH: ${{ vars.XCCONFIG_PATH }}
+  MARKETING_URL: ${{ vars.MARKETING_URL }}
+  APPLE_ID: ${{ secrets.APPLE_ID }}
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  APPLE_ITC_TEAM_ID: ${{ secrets.APPLE_ITC_TEAM_ID }}
+  MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+
+jobs:
+  upload:
+    name: Upload Metadata
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Xcode
+        uses: ./.github/actions/setup-xcode
+        with:
+          xcode_version: ${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}
+
+      - name: Setup Ruby and Gems
+        uses: ./.github/actions/setup-ruby-gems
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version || github.event.inputs.version }}" ]; then
+            echo "version=${{ inputs.version || github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(grep "MARKETING_VERSION" ${{ vars.XCCONFIG_PATH }} | cut -d'=' -f2 | tr -d ' ')
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify metadata exists
+        run: |
+          COUNT=$(find fastlane/metadata -type f \( -name "*.txt" -o -name "*.html" \) | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "❌ No metadata files found under fastlane/metadata/"
+            exit 1
+          fi
+          echo "📄 Found $COUNT metadata file(s) to upload"
+
+      - name: Upload metadata to App Store Connect
+        env:
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_GITHUB_ISSUES_WARNING: "1"
+        run: |
+          export PATH="/opt/homebrew/opt/ruby/bin:/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+          export LDFLAGS="-L/opt/homebrew/opt/ruby/lib"
+          export CPPFLAGS="-I/opt/homebrew/opt/ruby/include"
+          XCODE_VERSION="${{ inputs.xcode_version || github.event.inputs.xcode_version || 'Xcode-26.4.1.app' }}"
+          export DEVELOPER_DIR="/Applications/$XCODE_VERSION/Contents/Developer"
+
+          bundle exec fastlane upload_app_store_metadata \
+            version:"${{ steps.version.outputs.version }}" \
+            platform:"${{ inputs.platform || github.event.inputs.platform || 'iOS' }}"
+
+      - name: Send Slack notification - Success
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"✅ ${{ vars.APP_NAME }} metadata uploaded for v${{ steps.version.outputs.version }}\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Send Slack notification - Failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"❌ ${{ vars.APP_NAME }} metadata upload failed for v${{ steps.version.outputs.version }} — see <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|logs>\"}" \
+            "$SLACK_WEBHOOK_URL"
