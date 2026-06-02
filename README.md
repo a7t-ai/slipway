@@ -234,8 +234,7 @@ The three orchestrators are listed first. They are the entry points. The buildin
 | File                                            | What it does                                                                                                                 |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `generate_icons.py`                             | Generate every required iOS app icon size from one source image (PNG, JPG, or SVG via Inkscape). Outputs an `AppIcon.appiconset` ready to drop into your Xcode `Assets.xcassets`. |
-| `workflows/generate_release_notes.sh`           | Build the *What is New* string from recent commit messages, applying a copywriting persona.                                  |
-| `workflows/process_changes_in_version.sh`       | Extract user facing release notes from `CHANGES_IN_VERSION.md`. Falls back to a generic default if the section is empty.     |
+| `workflows/generate_release_notes.sh`           | Read user facing notes from `CHANGES_IN_VERSION.md` (`--changes-file`), then build the *What is New* string with a copywriting persona. Falls back to a random default if the section is empty. |
 | `workflows/clear_release_notes.sh`              | Reset `CHANGES_IN_VERSION.md` at the start of a new release cycle.                                                            |
 | `workflows/copywriting_persona.md`              | Prompt fragment used by `generate_release_notes.sh` to keep release notes copy consistent.                                   |
 

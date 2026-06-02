@@ -9,6 +9,10 @@
 # Usage:
 #   ./scripts/workflows/generate_release_notes.sh --type custom --changes "change1;change2"
 #   ./scripts/workflows/generate_release_notes.sh --type default --note "default note"
+#   ./scripts/workflows/generate_release_notes.sh --changes-file CHANGES_IN_VERSION.md
+#
+# Prefer --changes-file in CI: it reads the changelog straight from disk so the
+# text never has to be threaded back through the workflow (see SHELL-SAFETY note).
 #
 # Environment Variables:
 #   DEEPSEEK_API_KEY - Required for AI generation
@@ -19,6 +23,7 @@ set -e
 TYPE=""
 CHANGES=""
 NOTE=""
+CHANGES_FILE=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -35,12 +40,64 @@ while [[ $# -gt 0 ]]; do
             NOTE="$2"
             shift 2
             ;;
+        --changes-file)
+            CHANGES_FILE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown parameter: $1"
             exit 1
             ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# SHELL-SAFETY: read release-notes text straight from CHANGES_IN_VERSION.md.
+#
+# The workflow used to extract these strings and pass them back as
+# --changes/--note. Threading free-form text (apostrophes, "quotes") through a
+# workflow run: block breaks shell parsing ("unexpected EOF while looking for
+# matching '"). Parsing the file here keeps that text out of the workflow.
+# Do NOT reintroduce inline ${{ }} interpolation of changelog text into a
+# run: block — read the file (this mode) or pass via env: and read "$VAR".
+# ---------------------------------------------------------------------------
+parse_changes_file() {
+    local file="$1"
+    if [ ! -f "$file" ]; then
+        echo "❌ Error: changes file not found: $file"
+        exit 1
+    fi
+
+    # Custom changes = bullet lines that appear before the "Default" header.
+    # Match "- " (dash + space) so real bullets qualify but markdown comment
+    # delimiters like "-->" or "---" rules never get mistaken for a bullet.
+    local custom_changes
+    custom_changes=$(awk '/### Default Release Notes/{exit} 1' "$file" | grep '^- ' || true)
+
+    if [ -n "$custom_changes" ]; then
+        TYPE="custom"
+        # Strip "- " and join bullets with ';' (generate splits back on ';').
+        CHANGES=$(printf '%s\n' "$custom_changes" | sed 's/^- //' | tr '\n' ';' | sed 's/;$//')
+        echo "✅ Using custom changes from $file"
+    else
+        # No custom changes -> pick a random default note.
+        local default_notes count line
+        default_notes=$(awk '/### Default Release Notes/{flag=1; next} /^###/{flag=0} flag' "$file" | grep '^- ' || true)
+        if [ -z "$default_notes" ]; then
+            echo "❌ Error: no release notes found in $file"
+            exit 1
+        fi
+        count=$(printf '%s\n' "$default_notes" | grep -c '^- ')
+        line=$(( RANDOM % count + 1 ))
+        TYPE="default"
+        NOTE=$(printf '%s\n' "$default_notes" | sed -n "${line}p" | sed 's/^- //')
+        echo "🎲 Using random default note from $file"
+    fi
+}
+
+if [ -n "$CHANGES_FILE" ]; then
+    parse_changes_file "$CHANGES_FILE"
+fi
 
 # Validate required arguments
 if [ -z "$TYPE" ]; then

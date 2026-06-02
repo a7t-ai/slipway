@@ -1,16 +1,23 @@
 <!--
-This file is the contract between developers and the release-notes pipeline.
+This file is the contract between developers and the release-notes pipeline
+(read by scripts/workflows/generate_release_notes.sh --changes-file).
 
 Two sections:
 
-  1. Above the "Default Release Notes" header (this top part) is where you add
-     version-specific bullets as the week's work lands. Each PR appends a
+  1. Above the "### Default Release Notes" header (this top part) is where you
+     add version-specific bullets as the week's work lands. Each PR appends a
      line. The release-notes generator turns those bullets into App Store
      release notes copy.
 
-  2. Below "Default Release Notes" is the fallback pool. If the top section
+  2. Below "### Default Release Notes" is the fallback pool. If the top section
      is empty when a release fires, the generator picks a random line from
      here so the App Store entry never ships with empty notes.
+
+Rules:
+  - Only lines that start with "- " (dash + space) count as notes. Anything
+    else — including this comment and its "-->" delimiter — is ignored.
+  - Write freely: apostrophes and "quotes" are safe. The text is read straight
+    from this file and never passed through the workflow shell.
 
 The clear-release-notes workflow wipes the top section after a release ships
 and leaves the Default Release Notes section untouched.

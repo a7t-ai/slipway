@@ -1,3 +1,12 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SHELL-SAFETY RULE (do not remove):
+# Never interpolate ${{ }} expressions that carry free-form text — changelog
+# lines, AI-generated notes, manual input — directly into a `run:` block. A
+# stray apostrophe or quote (e.g. a feature note like What's new) breaks shell
+# parsing of the generated script. Instead:
+#   • pass the value through `env:` and read it as "$VAR", or
+#   • have the called script read the source file directly (--changes-file).
+# ─────────────────────────────────────────────────────────────────────────────
 name: Write Release Notes
 
 permissions:
@@ -142,31 +151,25 @@ jobs:
             echo "version=$VERSION" >> $GITHUB_OUTPUT
           fi
 
-      - name: Process CHANGES_IN_VERSION.md
-        id: changes
-        if: ${{ inputs.manual_text == '' }}
-        run: ./scripts/workflows/process_changes_in_version.sh
-
       - name: Generate release notes
         id: generate
         env:
           DEEPSEEK_API_KEY: ${{ env.DEEPSEEK_API_KEY }}
+          # Manual override is a dispatch input, so it must be passed in — do it
+          # via env: (never inline ${{ }}) so quotes/apostrophes stay intact. The
+          # changelog path reads CHANGES_IN_VERSION.md directly inside the script,
+          # so that text never touches this run: block. See SHELL-SAFETY rule above.
+          MANUAL_TEXT_INPUT: ${{ inputs.manual_text }}
         run: |
-          if [ -n "${{ inputs.manual_text }}" ]; then
-            MANUAL_TEXT=$(echo "${{ inputs.manual_text }}" | sed 's/\\n/\n/g')
+          if [ -n "$MANUAL_TEXT_INPUT" ]; then
+            MANUAL_TEXT=$(printf '%s' "$MANUAL_TEXT_INPUT" | sed 's/\\n/\n/g')
             {
               echo "english_notes<<EOF"
               echo "$MANUAL_TEXT"
               echo "EOF"
-            } >> $GITHUB_OUTPUT
-          elif [ "${{ steps.changes.outputs.has_custom_changes }}" = "true" ]; then
-            ./scripts/workflows/generate_release_notes.sh \
-              --type custom \
-              --changes "${{ steps.changes.outputs.custom_changes }}"
+            } >> "$GITHUB_OUTPUT"
           else
-            ./scripts/workflows/generate_release_notes.sh \
-              --type default \
-              --note "${{ steps.changes.outputs.selected_default }}"
+            ./scripts/workflows/generate_release_notes.sh --changes-file CHANGES_IN_VERSION.md
           fi
 
       - name: Update App Store Connect release notes
