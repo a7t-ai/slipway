@@ -22,7 +22,7 @@ The big one. Submits a brand new version for App Store review in a single chain:
 
 1. **Bump version** for the new release.
 2. **Create the App Store Connect version entry** (so Apple knows a new version is coming).
-3. **Write release notes** from recent commits, with a copywriting persona (optional, can be skipped to keep manual notes).
+3. **Write release notes** from the `CHANGES_IN_VERSION.md` bullets, with a copywriting persona (optional, can be skipped to keep manual notes).
 4. **Upload App Store metadata** (descriptions, keywords, beta contact info) from `fastlane/metadata/`.
 5. **Deliver to TestFlight** (build, sign with Match, notarize, upload).
 6. **Add the build to the App Store release entry** and **submit for review**.
@@ -186,7 +186,7 @@ The three orchestrators are listed first. They are the entry points. The buildin
 | `bump-version.yml`                    | Patch, minor, major, or `next_week_release` version bump via Fastlane. Pushes the bump commit back.   |
 | `create-tag.yml`                      | Cut a `vYY.MM.N` tag from the current `main`, annotated, force-push optional.                          |
 | `create-appstore-version.yml`         | Create the next App Store Connect version entry (for example `26.5.2`) ahead of submission.            |
-| `write-release-notes.yml`             | Generate the *What is New* copy from recent commits, applying the copywriting persona.                |
+| `write-release-notes.yml`             | Generate the *What is New* copy from `CHANGES_IN_VERSION.md`, applying the copywriting persona.        |
 | `upload-metadata.yml`                 | Upload localized App Store metadata (description, keywords, beta contact) from `fastlane/metadata/`.   |
 | `deliver-to-testflight.yml`           | Build, sign with Match, notarize, and upload to TestFlight via App Store Connect API.                  |
 | `add-build-to-release.yml`            | Attach the built `.ipa` to the App Store version entry and submit for review.                          |
