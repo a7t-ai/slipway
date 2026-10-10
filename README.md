@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="assets/hero.png" alt="Slipway hero" width="720" />
-
 # Slipway
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
